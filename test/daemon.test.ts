@@ -163,6 +163,8 @@ test('状態に所属・窓・拡張が出る', async () => {
   assert.ok(a?.running);
   assert.deepEqual(a.windows.map((w: any) => w.session), ['test/mcp']);
   assert.deepEqual(a.extensions, []);
+  // 置き場はこのユーザーだけに絞られている（記録に他人の発言が入るため）
+  assert.equal(s.homeAccess.ok, true, s.homeAccess.detail);
   // 窓は動いたばかりなので古くない。取りこぼしの報告はまだ無い
   assert.equal(a.windows[0].stale, false);
   assert.equal(a.windows[0].gaps, 0);

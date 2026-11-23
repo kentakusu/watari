@@ -1,5 +1,6 @@
 // 渡の置き場（WATARI_HOME）にあるもの: 設定・合言葉・常駐の名乗り・拡張の台帳・記録・プロファイル。
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -15,6 +16,8 @@ export type Config = {
   missingGraceMs?: number;
   /** 窓の画面も通信もこれだけ動かなければ「古い（stale）」と出す。既定 15 分 */
   staleMs?: number;
+  /** 通信の記録を何日残すか（今日を 1 日目と数える）。書かなければ期限なし */
+  captureRetentionDays?: number;
   headless?: boolean;
 };
 
@@ -30,6 +33,28 @@ const readJson = <T>(p: string, fallback: T): T => (existsSync(p) ? (JSON.parse(
 
 export function readConfig(home: string): Config {
   return { port: DEFAULT_PORT, ...readJson<Partial<Config>>(join(home, 'config.json'), {}) };
+}
+
+/**
+ * 置き場を、いまの OS ユーザー（と SYSTEM・Administrators）だけが触れるように絞る。
+ * 記録には他人の発言の本文がそのまま入るため。Windows では親（D:\ など）の権限を継がないようにする。
+ * 失敗しても常駐は止めない（理由を返し、状態に出す）。
+ */
+export function restrictHome(home: string): { ok: boolean; detail: string } {
+  mkdirSync(home, { recursive: true });
+  if (process.platform !== 'win32') {
+    try { chmodSync(home, 0o700); return { ok: true, detail: 'chmod 700' }; }
+    catch (e: any) { return { ok: false, detail: `chmod に失敗: ${e?.message ?? e}` }; }
+  }
+  // 名前でなく SID で指す（Windows の言語で名前が変わるため）
+  // コマンドは System32 から呼ぶ（Git Bash などの PATH では同じ名前の別物が先に当たる）
+  const sys32 = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32');
+  const who = spawnSync(join(sys32, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true });
+  const sid = who.stdout?.trim().split(',').pop()?.replaceAll('"', '');
+  if (!sid?.startsWith('S-1-')) return { ok: false, detail: `自分の SID が分かりません: ${who.stderr || who.stdout}` };
+  const r = spawnSync(join(sys32, 'icacls.exe'), [home, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`, '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F'], { encoding: 'utf8', windowsHide: true });
+  if (r.status !== 0) return { ok: false, detail: `icacls が ${r.status} で終わりました: ${(r.stdout + r.stderr).trim()}` };
+  return { ok: true, detail: `継承を切り、${sid}・SYSTEM・Administrators だけにした` };
 }
 
 /** 常駐に話しかけるための合言葉。無ければ作る。 */
