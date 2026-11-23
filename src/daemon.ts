@@ -2,7 +2,8 @@
 // 口には合言葉（WATARI_HOME/token）が要る。合言葉なしで通るのは生死の確認（/health）だけ。
 import { createServer, type IncomingMessage } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
-import { existsSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync } from 'node:fs';
+import { searchCaptures } from './capture.ts';
 import { isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Affiliation, type Extension } from './watari.ts';
@@ -32,12 +33,18 @@ export async function loadExtension(path: string): Promise<Extension> {
   for (const w of e.watch) if (typeof w?.name !== 'string' || typeof w?.selector !== 'string') throw bad('watch の各項に name と selector が要る');
   if (typeof e.onChange !== 'function') throw bad('onChange が関数ではない');
   if (e.notifyTo !== undefined && (typeof e.notifyTo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(e.notifyTo))) throw bad('notifyTo は「所属/名前」');
+  if (e.capture !== undefined) {
+    if (!Array.isArray(e.capture)) throw bad('capture が配列ではない');
+    for (const c of e.capture) if (typeof c?.name !== 'string' || typeof c?.url !== 'string' || !c.url) throw bad('capture の各項に name と url が要る');
+  }
+  if (e.onCapture !== undefined && typeof e.onCapture !== 'function') throw bad('onCapture が関数ではない');
   return e;
 }
 
 export async function startDaemon(opts: DaemonOptions) {
   const home = opts.home;
   const cfg = readConfig(home);
+  const staleMs = cfg.staleMs ?? 15 * 60 * 1000;
   const port = opts.port ?? cfg.port;
   const token = Buffer.from(ensureToken(home));
   const startedAt = now();
@@ -107,7 +114,12 @@ export async function startDaemon(opts: DaemonOptions) {
       affiliations: [...affiliations.values()].map((a) => ({
         name: a.name, running: a.running, startedAt: a.startedAt,
         extensions: a.extensions.map((e) => e.name),
-        windows: [...a.windows.values()].map((w) => ({ session: w.session, label: w.label, url: w.url, touching: w.touching, lastEventAt: w.lastEventAt })),
+        windows: [...a.windows.values()].map((w) => ({
+          session: w.session, label: w.label, url: w.url, touching: w.touching, lastEventAt: w.lastEventAt,
+          // 画面も通信も長く動いていない＝見えていないかもしれない（ログイン切れ・止まった画面）。「0 件」と区別するため
+          stale: !w.lastEventAt || Date.now() - Date.parse(w.lastEventAt) > staleMs,
+          gaps: w.gaps, lastReport: w.lastReport,
+        })),
       })),
     }),
     'window.open': async (p) => {
@@ -120,14 +132,38 @@ export async function startDaemon(opts: DaemonOptions) {
     },
     'window.info': async (p) => win(p.session).act.info(p.maxText ?? 4000),
     'window.read': async (p) => ({ text: await win(p.session).act.read(p.selector) }),
+    'window.collect': async (p) => {
+      if (!p.fields || typeof p.fields !== 'object') throw new Error('fields が要ります（例: {"name": ".title", "id": "@data-id"}）');
+      return { items: await win(p.session).act.collect(p.selector, p.fields) };
+    },
     'window.click': async (p) => { await win(p.session).act.click(p.selector); return { ok: true }; },
     'window.type': async (p) => { await win(p.session).act.type(p.selector, p.text); return { ok: true }; },
     'window.press': async (p) => { await win(p.session).act.press(p.key, p.modifiers ?? 0); return { ok: true }; },
     'window.screenshot': async (p) => ({ png: await win(p.session).act.screenshot() }),
+    'window.outline': async (p) => win(p.session).act.outline(p.selector ?? 'body', p.depth ?? 6, p.maxNodes ?? 400, p.textChars ?? 12),
     'window.touch': async (p) => { win(p.session).setTouching(!!p.on); return { ok: true }; },
     'window.focus': async (p) => { await win(p.session).focus(); return { ok: true }; },
     'window.label': async (p) => { await win(p.session).setLabel(String(p.label)); saveWindows(); return { ok: true }; },
     'window.close': async (p) => { await win(p.session).close(); return { ok: true }; },
+    'capture.search': async (p) => {
+      if (typeof p.affiliation !== 'string' || !p.affiliation) throw new Error('affiliation が要ります');
+      return searchCaptures(home, p.affiliation, { name: p.name, ext: p.ext, session: p.session, since: p.since, contains: p.contains, limit: p.limit });
+    },
+    'log.recent': async (p) => {
+      if (typeof p.affiliation !== 'string' || !/^[^/\\\s.]+$/.test(p.affiliation)) throw new Error('affiliation が要ります');
+      const file = join(home, 'log', `${p.affiliation}.jsonl`);
+      if (!existsSync(file)) return { items: [], note: 'まだ記録がありません' };
+      const types: string[] | undefined = Array.isArray(p.types) && p.types.length ? p.types : undefined;
+      const limit = Math.min(Math.max(Number(p.limit) || 50, 1), 500);
+      // 末尾から読む（大きくなったファイルでも新しいものだけ見ればよい）
+      const lines = readFileSync(file, 'utf8').split('\n').filter(Boolean);
+      const items: unknown[] = [];
+      for (let i = lines.length - 1; i >= 0 && items.length < limit; i--) {
+        const rec = JSON.parse(lines[i]);
+        if (!types || types.includes(rec.type)) items.push(rec);
+      }
+      return { items };
+    },
     'extension.list': async (p) => readExtensions(home).filter((r) => !p.affiliation || r.affiliation === p.affiliation),
     'extension.install': async (p) => {
       if (typeof p.affiliation !== 'string' || !p.affiliation) throw new Error('affiliation が要ります');

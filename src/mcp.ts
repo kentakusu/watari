@@ -46,6 +46,10 @@ tool('read', 'セレクタに当たる最初の要素のテキストを返す。
   { selector: z.string() },
   async (a) => text(JSON.stringify(await daemon.call('window.read', { session: mySession(), selector: a.selector }))));
 
+tool('collect', '一覧を項目ごとのオブジェクトにして読む。fields の値は "@属性"（項目の属性）・"セレクタ"（項目の中のテキスト）・"セレクタ@属性"・"."（項目のテキスト）。',
+  { selector: z.string().describe('項目のセレクタ'), fields: z.record(z.string(), z.string()) },
+  async (a) => text(JSON.stringify(await daemon.call('window.collect', { session: mySession(), selector: a.selector, fields: a.fields }), null, 2)));
+
 tool('click', 'セレクタに当たる要素の真ん中をクリックする（人のクリックと同じ扱い）。人が「今触ってる」の間は待つ。',
   { selector: z.string() },
   async (a) => { await daemon.call('window.click', { session: mySession(), selector: a.selector }); return text('押しました'); });
@@ -61,6 +65,15 @@ tool('press_key', 'キーを 1 回押す。modifiers は Alt=1, Ctrl=2, Meta=4, 
 tool('screenshot', '窓の見えている範囲を画像で返す。',
   {},
   async () => ({ content: [{ type: 'image' as const, data: (await daemon.call('window.screenshot', { session: mySession() })).png, mimeType: 'image/png' }] }));
+
+tool('dom_outline', '窓の画面の作り（タグ・id・class・data- 属性・短く切ったテキスト）を木で返す。拡張のセレクタを探すため。読むだけ。中身のテキストを読むときは read を使う。',
+  {
+    selector: z.string().optional().describe('根にする要素（既定 body）'),
+    depth: z.number().int().min(1).max(30).optional(),
+    max_nodes: z.number().int().min(1).max(3000).optional(),
+    text_chars: z.number().int().min(0).max(200).optional().describe('テキストを何文字で切るか（既定 12）'),
+  },
+  async (a) => text(JSON.stringify(await daemon.call('window.outline', { session: mySession(), selector: a.selector, depth: a.depth, maxNodes: a.max_nodes, textChars: a.text_chars }))));
 
 tool('set_label', '窓の名札の名前を変える。',
   { label: z.string().min(1).max(60) },
@@ -78,7 +91,22 @@ tool('remove_extension', '拡張を所属から外す。',
   { name: z.string() },
   async (a) => { await daemon.call('extension.remove', { affiliation: affiliation(), name: a.name, by: mySession() }); return text('外しました'); });
 
-tool('watari_status', '渡の常駐の状態（所属ごとの Chrome・窓・拡張・拡張を読めなかった記録）。',
+tool('search_captures', 'このセッションの所属で、拡張が記録した通信（HTTP の応答・WebSocket のメッセージ）を新しい順に探す。要求の見出し（Cookie 等）は記録していない。matched は当たった総数（limit で切る前）。',
+  {
+    name: z.string().optional().describe('拡張が付けた記録の名前'),
+    ext: z.string().optional(),
+    session: z.string().optional().describe('所属/名前。省くと所属のすべての窓'),
+    since: z.string().optional().describe('ISO の時刻。これより後だけ'),
+    contains: z.string().optional().describe('URL か本文に含む文字'),
+    limit: z.number().int().min(1).max(500).optional(),
+  },
+  async (a) => text(JSON.stringify(await daemon.call('capture.search', { affiliation: affiliation(), ...a }), null, 2)));
+
+tool('recent_log', 'このセッションの所属の記録（見張りの変化・操作・通知・失敗）を新しい順に返す。失敗だけ見るなら types に extension-error / notify-failed / capture-write-failed などを入れる。',
+  { types: z.array(z.string()).optional(), limit: z.number().int().min(1).max(500).optional() },
+  async (a) => text(JSON.stringify(await daemon.call('log.recent', { affiliation: affiliation(), ...a }), null, 2)));
+
+tool('watari_status', '渡の常駐の状態（所属ごとの Chrome・窓・拡張・拡張を読めなかった記録）。窓の stale が true なら、画面も通信も長く動いていない（見えていないかもしれない）。gaps は拡張が「取りこぼしたかもしれない」と報告した数。',
   {},
   async () => text(JSON.stringify(await daemon.call('status'), null, 2)));
 
