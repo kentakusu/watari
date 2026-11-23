@@ -51,6 +51,10 @@ before(async () => {
   const html = readFileSync(join(here, 'fixtures', 'inbox.html'), 'utf8');
   site = createServer((req, res) => {
     const u = new URL(req.url ?? '/', 'http://x');
+    if (u.pathname === '/compose') {
+      res.setHeader('content-type', 'text/html; charset=utf-8');
+      return res.end(readFileSync(join(here, 'fixtures', 'compose.html')));
+    }
     if (u.pathname === '/patrol') {
       res.setHeader('content-type', 'text/html; charset=utf-8');
       return res.end(readFileSync(join(here, 'fixtures', 'patrol.html')));
@@ -139,7 +143,14 @@ test('形の違う拡張は入れずに断る', async () => {
   const r = await call(mcp, 'install_extension', { path: p });
   assert.equal(r.isError, true);
   assert.match(textOf(r), /sites が空/);
+  // watch と onChange は省ける。ただし onChange の無い watch は断る
+  writeFileSync(p, 'export default { name: "bad", sites: ["http://x/*"], watch: [{ name: "a", selector: "#a" }] };');
+  assert.match(textOf(await call(mcp, 'install_extension', { path: p })), /onChange が要る/);
   assert.equal(JSON.parse(textOf(await call(mcp, 'list_extensions'))).length, 0);
+  // 通信だけを読む拡張（watch も onChange も無い）は入る
+  writeFileSync(p, 'export default { name: "capture-only", sites: ["http://x/*"], capture: [{ name: "c", url: "http://x/*" }], onCapture() {} };');
+  assert.ok(!(await call(mcp, 'install_extension', { path: p })).isError);
+  assert.ok(!(await call(mcp, 'remove_extension', { name: 'capture-only' })).isError);
 });
 
 test('拡張を入れると窓で動き、通知はその窓のセッションへ行く', async () => {
@@ -367,6 +378,50 @@ test('巡回: 拡張は一覧の形と最新の番号だけ。未読の部屋を
   assert.match(logText, /"type":"patrol-opened","stream":"a"/);
   assert.match(logText, /"type":"owner-read-ignored","stream":"a"/);
   assert.ok(!(await call(mcp, 'remove_extension', { name: 'patrol-ext' })).isError);
+});
+
+test('書いて送る: 行ごとに入れて送り、空になるのを待つ。書きかけ・空にならない・文が合わないときは送らずに投げる', async () => {
+  const p = join(home, 'compose-ext.mjs');
+  writeFileSync(p, `export default {
+    name: 'compose-ext', sites: ['http://127.0.0.1:*/compose*'], watch: [{ name: '送る文', selector: '#go' }],
+    async onChange(e, w) {
+      if (!e.value) return;
+      try { await w.compose(e.value.replace(/\\|/g, '\\n'), { editor: '#ed', newline: { key: 'Enter', modifiers: 8 }, send: { key: 'Enter' }, settleMs: 800, emptyTimeoutMs: 1000 }); w.report({ note: 'compose-ok' }); }
+      catch (err) { w.report({ note: 'compose-ng: ' + err.message }); }
+    },
+  };`);
+  assert.ok(!(await call(mcp, 'install_extension', { path: p })).isError);
+  const tok = readFileSync(join(home, 'token'), 'utf8').trim();
+  const note = async () => {
+    const st = await (await fetch(`http://127.0.0.1:${port}/rpc`, { method: 'POST', headers: { authorization: `Bearer ${tok}`, 'content-type': 'application/json' }, body: JSON.stringify({ method: 'status' }) })).json() as any;
+    return st.result.affiliations.find((x: any) => x.name === 'test').windows.find((x: any) => x.session === 'test/mcp').lastReport as string;
+  };
+  const readText = async (sel: string) => JSON.parse(textOf(await call(mcp, 'read', { selector: sel }))).text as string;
+  const run = async (query: string) => {
+    await call(mcp, 'open_window', { url: `${siteUrl}compose?${query}` });
+    const t0 = Date.now();
+    await waitFor(async () => { const n = await note(); return /compose-(ok|ng)/.test(n) && n !== prev; }, 15000, `結果（${query}）`);
+    prev = await note();
+    void t0;
+    return prev;
+  };
+  let prev = await note();
+  // 1. ふつうに送る（2 行）
+  assert.equal(await run('go=' + encodeURIComponent('一行目|二行目')), 'compose-ok');
+  assert.equal(await readText('#sent'), '一行目⏎二行目');
+  assert.equal(await readText('#ed'), '');
+  // 2. 書きかけがある: 送らない・書きかけは消さない
+  assert.match(await run('go=abc&draft=' + encodeURIComponent('人の書きかけ')), /compose-ng: .*書きかけ/);
+  assert.equal(await readText('#sent'), '');
+  assert.equal(await readText('#ed'), '人の書きかけ');
+  // 3. 送っても空にならない: 投げて、入力欄を空に戻す
+  assert.match(await run('go=abc&nosend=1'), /compose-ng: .*空になりません/);
+  assert.equal(await readText('#ed'), '');
+  // 4. 入った文が合わない: 送らずに空に戻す
+  assert.match(await run('go=abc&mangle=1'), /compose-ng: .*合いません/);
+  assert.equal(await readText('#sent'), '');
+  assert.equal(await readText('#ed'), '');
+  assert.ok(!(await call(mcp, 'remove_extension', { name: 'compose-ext' })).isError);
 });
 
 test('見えている分しか描かない一覧を、目当ての要素が出るまでたどる（末尾では続きの読み込みを待つ）', async () => {

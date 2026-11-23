@@ -57,10 +57,10 @@ export async function loadExtension(path: string): Promise<Extension> {
   if (!e || typeof e !== 'object') throw bad('default export がありません');
   if (typeof e.name !== 'string' || !/^[\w.-]+$/.test(e.name)) throw bad('name は英数字・_・.・- だけ');
   if (!Array.isArray(e.sites) || !e.sites.length || !e.sites.every((s) => typeof s === 'string')) throw bad('sites が空');
-  if (!Array.isArray(e.watch)) throw bad('watch が配列ではない');
-  for (const w of e.watch) if (typeof w?.name !== 'string' || typeof w?.selector !== 'string') throw bad('watch の各項に name と selector が要る');
-  if (typeof e.onChange !== 'function') throw bad('onChange が関数ではない');
-  if (e.notifyTo !== undefined && (typeof e.notifyTo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(e.notifyTo))) throw bad('notifyTo は「所属/名前」');
+  if (e.watch !== undefined && !Array.isArray(e.watch)) throw bad('watch が配列ではない');
+  for (const w of e.watch ?? []) if (typeof w?.name !== 'string' || typeof w?.selector !== 'string') throw bad('watch の各項に name と selector が要る');
+  if (e.onChange !== undefined && typeof e.onChange !== 'function') throw bad('onChange が関数ではない');
+  if (e.watch?.length && !e.onChange) throw bad('watch を書くなら onChange が要る');  if (e.notifyTo !== undefined && (typeof e.notifyTo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(e.notifyTo))) throw bad('notifyTo は「所属/名前」');
   if (e.capture !== undefined) {
     if (!Array.isArray(e.capture)) throw bad('capture が配列ではない');
     for (const c of e.capture) {

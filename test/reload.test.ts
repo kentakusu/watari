@@ -16,7 +16,7 @@ const write = (ver: string) => {
   writeFileSync(join(dir, 'lib', 'deep.mjs'), `export const deep = '${ver}';`);
   writeFileSync(join(dir, 'parse.mjs'), `import { deep } from './lib/deep.mjs'; export const parse = () => 'parse-${ver}/' + deep;`);
   writeFileSync(join(dir, 'index.mjs'), `import { parse } from './parse.mjs';
-export default { name: 'reload-ext', sites: ['http://example.invalid/*'], watch: [], onChange() {}, version: parse() };`);
+export default { name: 'reload-ext', sites: ['http://example.invalid/*'], capture: [{ name: 'c', url: 'http://example.invalid/*' }], onCapture() {}, version: parse() };`);
 };
 
 test('拡張を入れ直すと、import している自分のファイル（2 段先まで）も新しい版になる', async () => {

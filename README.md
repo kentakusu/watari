@@ -85,7 +85,7 @@ claude mcp add watari --scope user -- node /mnt/d/watari/app/src/mcp.ts --home /
 
 ## 拡張の書き方
 
-[`examples/badge-watch/index.ts`](examples/badge-watch/index.ts) が例です。拡張は `name`・`sites`（触れてよいサイト）・`watch`（見張るセレクタ）・`onChange`（値が変わったときの動き）を持ちます。`onChange` には窓を操る道具（`read`・`click`・`type`・`press`・`notify`）が渡ります。
+[`examples/badge-watch/index.ts`](examples/badge-watch/index.ts) が例です。拡張は `name`・`sites`（触れてよいサイト）・`watch`（見張るセレクタ）・`onChange`（値が変わったときの動き）を持ちます。通信だけを読む拡張は `watch` と `onChange` を省けます（`watch` を書くなら `onChange` が要ります）。`onChange` には窓を操る道具（`read`・`click`・`type`・`press`・`notify`）が渡ります。
 
 - 入れるのは MCP の `install_extension`（絶対パス）。同じ所属の開いている窓すべてに、ページを読み直さずに効きます。形が違う拡張は入れずに断ります。入れ直すと、拡張が import している自分のファイル（`./parse.ts` など。`node_modules` の外）も読み直します。常駐の起こし直しは要りません。
 - 見張りはページのスクリプトから見えない別世界で動きます。
@@ -227,6 +227,21 @@ async onSend(req, w) {            // req = { id, stream, text }
 - 結果は 3 つです: `confirmed`（台帳に自分の発言として本文が完全一致で入った）／`unconfirmed`（`confirmSeconds` 待っても入らなかった＝送れていても確かめられていない。あとで入れば `confirmed` に変わる）／`failed`（`onSend` が投げた）。
 - `onSend` が動いている間は、同じ窓の拡張のほかの操作は待ちます（部屋を切り替えて書きかけが消えないように）。人が「今触ってる」を押している間は、`onSend` の中の `click`・`type` も待ちます。
 - 預けと結果は台帳（`ledger/<所属>.db`）と記録に残ります。MCP の `outbox_list` で最近の預けと状態の数が見られます。
+
+`onSend` の中で、書いて送る決まった手順は `w.compose(text, spec)` に任せられます。サイトの読み方（送るキーを画面の案内から読むなど）は拡張に残し、決まったものだけを渡します。
+
+```js
+await w.compose(req.text, {
+  editor: '#editor',                          // 入力欄（textarea・input・contenteditable）
+  newline: { key: 'Enter', modifiers: 8 },    // 行の間に押すキー（既定 Shift+Enter）
+  send: { key: 'Enter' },                     // 送り方（キー）。ボタンなら { click: 'セレクタ' }
+});
+```
+
+- 入力欄に書きかけがあれば、送らずに投げます（人が書いている途中かもしれないため。書きかけは消しません）。
+- 行ごとに入れ、入力欄の文が送る文と同じか確かめます（空白のまとまりは 1 つとして比べる）。違えば入力欄を空に戻し、送らずに投げます。
+- 送ったあと、入力欄が空になるのを待ちます（既定 5 秒）。空にならなければ「送れたか分からない」として入力欄を空に戻して投げます。
+- 送れたかどうかの最後の確かめ（台帳に自分の発言として入るか）は、送る口が別に行います。記録には `compose`／`compose-failed`（文字数だけ。本文は残さない）が残ります。
 
 ### 見えているかを確かめる
 
