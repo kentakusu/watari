@@ -43,6 +43,7 @@ export async function loadExtension(path: string): Promise<Extension> {
     }
   }
   if (e.onCapture !== undefined && typeof e.onCapture !== 'function') throw bad('onCapture が関数ではない');
+  if (e.onSend !== undefined && typeof e.onSend !== 'function') throw bad('onSend が関数ではない');
   return e;
 }
 
@@ -78,6 +79,7 @@ export async function startDaemon(opts: DaemonOptions) {
       name, home, notifier, headless: opts.headless ?? cfg.headless, missingGraceMs: opts.missingGraceMs ?? cfg.missingGraceMs,
       // 毎回読む（設定の triggers を書き換えれば、常駐を起こし直さなくても次の発言から効く）
       triggerConfig: () => triggerConfigOf(name),
+      outboxConfig: () => { const o = readConfig(home).outbox; return o?.[name] ?? o?.['*']; },
     });
     a.onWindowsChanged = () => saveWindows();
     await a.start();
@@ -206,6 +208,19 @@ export async function startDaemon(opts: DaemonOptions) {
       const a = affiliations.get(name);
       if (!a?.running) return { items: [], note: 'この所属の Chrome は動いていません（起こす条件も動いていません）' };
       return { items: a.triggers().recentFires(p.limit ?? 20), stats: a.triggers().stats() };
+    },
+    'outbox.send': async (p) => {
+      const name = affName(p.affiliation);
+      const a = affiliations.get(name);
+      if (!a?.running) throw new Error(`所属 ${name} の Chrome が動いていません（送るには、その所属の窓が開いている必要があります）`);
+      if (typeof p.stream !== 'string' || !p.stream || typeof p.text !== 'string') throw new Error('stream と text が要ります');
+      return a.send(String(p.by ?? '不明'), p.stream, p.text, { allowRepeat: !!p.allowRepeat });
+    },
+    'outbox.list': async (p) => {
+      const name = affName(p.affiliation);
+      const a = affiliations.get(name);
+      if (!a?.running) return { items: [], note: 'この所属の Chrome は動いていません' };
+      return { items: a.outbox().recent(p.limit ?? 20), counts: a.outbox().counts() };
     },
     'capture.search': async (p) => {
       if (typeof p.affiliation !== 'string' || !p.affiliation) throw new Error('affiliation が要ります');

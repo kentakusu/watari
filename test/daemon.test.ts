@@ -45,6 +45,8 @@ before(async () => {
     port,
     // 台帳の試験用: 宛ての発言で test/mcp を起こす（静けさを短く）
     triggers: { test: { notifyTo: 'test/mcp', quietSeconds: 0.2, maxWaitSeconds: 2, rules: [{ name: 'toMe', toMe: true }] } },
+    // 送る口の試験用: room-a だけ許し、確かめは 2 秒で打ち切る
+    outbox: { test: { allowedStreams: ['room-a'], confirmSeconds: 2 } },
   }));
   const html = readFileSync(join(here, 'fixtures', 'inbox.html'), 'utf8');
   site = createServer((req, res) => {
@@ -78,7 +80,7 @@ test('口: 合言葉なしでは断る・生死の確認だけは通す', async 
 
 test('MCP の道具がそろっている', async () => {
   const names = (await mcp.listTools()).tools.map((t) => t.name).sort();
-  for (const n of ['open_window', 'window_info', 'read', 'collect', 'click', 'type_text', 'press_key', 'screenshot', 'dom_outline', 'set_label', 'list_extensions', 'install_extension', 'remove_extension', 'search_captures', 'recent_log', 'ledger_unread', 'ledger_read', 'ledger_search', 'ledger_fires', 'watari_status']) {
+  for (const n of ['open_window', 'window_info', 'read', 'collect', 'click', 'type_text', 'press_key', 'screenshot', 'dom_outline', 'set_label', 'list_extensions', 'install_extension', 'remove_extension', 'search_captures', 'recent_log', 'ledger_unread', 'ledger_read', 'ledger_search', 'ledger_fires', 'send_message', 'outbox_list', 'watari_status']) {
     assert.ok(names.includes(n), `${n} がありません: ${names.join(',')}`);
   }
 });
@@ -221,6 +223,52 @@ test('台帳の無い所属を読んでも、台帳のファイルを作らな�
   const r = await daemon.methods['ledger.search']({ affiliation: 'no-ledger', q: '何か' }).then(() => null, (e: Error) => e.message);
   assert.match(String(r), /まだ台帳がありません/);
   assert.ok(!existsSync(join(home, 'ledger', 'no-ledger.db')), '読んだだけで台帳のファイルができた');
+});
+
+test('送る口: 画面で送り、台帳で確かめる（確かめ済み・確かめられない・送れなかった）。関所で断るものは送らない', async () => {
+  const p = join(home, 'sender-ext.mjs');
+  writeFileSync(p, `export default {
+    name: 'sender', sites: ['http://127.0.0.1:*/*'], watch: [],
+    onChange() {},
+    async onSend(req, w) {
+      if (req.text.includes('[失敗]')) throw new Error('送る欄が見つからない（試し）');
+      await w.type('#msg', req.text);
+      await w.click('#send');
+      if (req.text.includes('[確かめない]')) return;
+      // 画面に出た自分の発言を台帳に入れる（本物の拡張では、通信や画面から読む）
+      const shown = await w.readAll('#log li');
+      w.ledger.put([{ stream: req.stream, id: 'sent-' + req.id, at: new Date().toISOString(), text: shown[shown.length - 1], mine: true }]);
+    },
+  };`);
+  assert.ok(!(await call(mcp, 'install_extension', { path: p })).isError);
+  await call(mcp, 'open_window', { url: siteUrl });
+  await waitFor(async () => !(await call(mcp, 'window_info')).isError, 15000, '窓の見張りが立つ');
+  const logCount = async () => JSON.parse(textOf(await call(mcp, 'collect', { selector: '#log li', fields: { t: '.' } }))).items.length;
+
+  const ok = JSON.parse(textOf(await call(mcp, 'send_message', { stream: 'room-a', text: '送る口の試し' })));
+  assert.equal(ok.status, 'confirmed', JSON.stringify(ok));
+  assert.equal(ok.by, 'test/mcp');
+  const shown = JSON.parse(textOf(await call(mcp, 'collect', { selector: '#log li', fields: { t: '.' } }))).items.map((x: any) => x.t);
+  assert.equal(shown.at(-1), '送る口の試し');
+
+  const n = await logCount();
+  const again = await call(mcp, 'send_message', { stream: 'room-a', text: '送る口の試し' });
+  assert.equal(again.isError, true);
+  assert.match(textOf(again), /二重に届くのを防ぐ/);
+  const notAllowed = await call(mcp, 'send_message', { stream: 'room-b', text: 'ほかの部屋' });
+  assert.equal(notAllowed.isError, true);
+  assert.match(textOf(notAllowed), /この部屋には送れません/);
+  assert.equal(await logCount(), n, '断ったのに画面で送られている');
+
+  const unconfirmed = JSON.parse(textOf(await call(mcp, 'send_message', { stream: 'room-a', text: '[確かめない] 送れたが入らない' })));
+  assert.equal(unconfirmed.status, 'unconfirmed');
+  const failed = JSON.parse(textOf(await call(mcp, 'send_message', { stream: 'room-a', text: '[失敗] 送れない' })));
+  assert.equal(failed.status, 'failed');
+  assert.match(failed.note, /送る欄が見つからない/);
+
+  const list = JSON.parse(textOf(await call(mcp, 'outbox_list')));
+  assert.deepEqual([list.counts.confirmed, list.counts.unconfirmed, list.counts.failed], [1, 1, 1]);
+  assert.ok(!(await call(mcp, 'remove_extension', { name: 'sender' })).isError);
 });
 
 test('台帳に無い発言を読もうとすると、黙らずに失敗を返す', async () => {

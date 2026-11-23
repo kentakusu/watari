@@ -7,6 +7,7 @@ import { openState, type ExtensionState } from './state.ts';
 import { Ledger, type LedgerItemInput, type PutResult } from './ledger.ts';
 import { TriggerEngine, type TriggerConfig } from './triggers.ts';
 import { decodeMqtt, type MqttPacket } from './mqtt.ts';
+import { Outbox, type OutboxConfig, type OutboxEntry } from './outbox.ts';
 import { NetworkTap, appendCapture, type Capture, type CaptureRule, type CaptureSpec } from './capture.ts';
 
 export type WatchSpec = { name: string; selector: string; read?: string };
@@ -67,6 +68,12 @@ export type Extension = {
   /** 取る通信。宣言したものだけが記録され（captures/<所属>/<日付>.jsonl）、onCapture に渡る */
   capture?: CaptureSpec[];
   onCapture?(c: Capture, w: WindowApi): Promise<void> | void;
+  /**
+   * 預かった本文を、画面でそのまま送る（送る口）。req.text を変えずに送ること。
+   * 送れなかったら投げる。送ったことの確かめは本体が台帳で行う（自分の発言として本文が完全一致で入るか）。
+   * 動いている間は、同じ窓の拡張のほかの操作は待つ。
+   */
+  onSend?(req: { id: number; stream: string; text: string }, w: WindowApi): Promise<void>;
 };
 
 export type Notifier = (session: string, text: string) => Promise<void>;
@@ -80,6 +87,8 @@ export type AffiliationOptions = {
   missingGraceMs?: number;
   /** この所属の「起こす条件」（呼ぶたびに読むので、設定を書き換えればすぐ効く） */
   triggerConfig?: () => TriggerConfig | undefined;
+  /** この所属の送る口の設定（呼ぶたびに読む） */
+  outboxConfig?: () => OutboxConfig | undefined;
 };
 
 export class NotFound extends Error {}
@@ -106,6 +115,7 @@ export class Affiliation {
     this.notifier = opts.notifier;
     this.missingGraceMs = opts.missingGraceMs ?? 10000;
     this.#triggerConfig = opts.triggerConfig ?? (() => undefined);
+    this.#outboxConfig = opts.outboxConfig ?? (() => undefined);
     this.#headless = !!opts.headless;
     mkdirSync(join(this.home, 'log'), { recursive: true });
   }
@@ -221,6 +231,47 @@ export class Affiliation {
     this.#ledger ??= new Ledger(this.home, this.name);
     return this.#ledger;
   }
+  #outboxConfig: () => OutboxConfig | undefined;
+  #outbox?: Outbox;
+  outbox(): Outbox {
+    this.#outbox ??= new Outbox(this.ledger().db);
+    return this.#outbox;
+  }
+
+  /**
+   * 送る口: 関所を通し、拡張の onSend で送り、台帳で確かめる。最後の状態を返す（confirmed / unconfirmed / failed）。
+   * 関所で断ったときは投げる（預けを作らない）。
+   */
+  async send(by: string, stream: string, text: string, opt: { allowRepeat?: boolean } = {}): Promise<OutboxEntry> {
+    const cfg = this.#outboxConfig();
+    const box = this.outbox();
+    const refused = box.check(cfg, stream, text, this.ledger().streamInfo(stream).kind, opt);
+    if (refused) throw new Error(refused);
+    const ext = this.#extensions.find((e) => typeof e.onSend === 'function');
+    if (!ext) throw new Error('送る拡張が入っていません（onSend を持つ拡張が無い）');
+    const win = [...this.windows.values()].find((w) => siteMatches(ext.sites, w.url));
+    if (!win) throw new Error(`拡張 ${ext.name} のサイトを開いている窓がありません`);
+    const entry = box.create(by, stream, text);
+    this.log({ type: 'send-requested', id: entry.id, by, stream, ext: ext.name, length: text.length });
+    if (!box.claim(entry.id)) throw new Error(`預け ${entry.id} は、もう送り始めています`);
+    try {
+      await win.runSend(ext, { id: entry.id, stream, text });
+      this.log({ type: 'send-done', id: entry.id, stream });
+    } catch (e: any) {
+      box.fail(entry.id, `送れなかった: ${e?.message ?? e}`);
+      this.log({ type: 'send-failed', id: entry.id, stream, error: String(e?.message ?? e) });
+      return box.get(entry.id)!;
+    }
+    // 台帳に「自分の発言・本文が完全一致」が入るのを待つ（入れば ledger.put の中で confirmed になる）
+    const end = Date.now() + (cfg?.confirmSeconds ?? 60) * 1000;
+    while (Date.now() < end && box.get(entry.id)!.status === 'sending') await new Promise((r) => setTimeout(r, 250));
+    if (box.get(entry.id)!.status === 'sending') {
+      box.unconfirmed(entry.id, `${cfg?.confirmSeconds ?? 60} 秒待っても、台帳に自分の発言として入らなかった（送れていても確かめられていない）`);
+      this.log({ type: 'send-unconfirmed', id: entry.id, stream });
+    }
+    return box.get(entry.id)!;
+  }
+
   triggers(): TriggerEngine {
     this.#triggers ??= new TriggerEngine({
       db: this.ledger().db,
@@ -322,6 +373,11 @@ export class SessionWindow {
   }
 
   /** 記録済みの通信を、この窓の拡張の onCapture に渡す（ワーカーの通信もここを通る） */
+  /** 送る口: 拡張の onSend を、この窓の作業の列の中で動かす（ほかの操作は待つ） */
+  runSend(ext: Extension, req: { id: number; stream: string; text: string }): Promise<void> {
+    return this.#serial(async () => { await ext.onSend!(req, this.#api(ext)); });
+  }
+
   dispatchCapture(full: Capture): void {
     this.lastEventAt = now();
     const ext = this.#aff.extensions.find((e) => e.name === full.ext);
@@ -575,6 +631,8 @@ export class SessionWindow {
         put: (items, opt = {}) => {
           const r = this.#aff.ledger().put(items);
           this.#aff.triggers().consider(r.added, opt);
+          // 送った本文が自分の発言として入ったかを確かめる
+          for (const c of this.#aff.outbox().matchLedger([...r.added, ...r.updated])) log({ type: 'send-confirmed', id: c.id, stream: c.stream, by: c.confirmedBy });
           if (r.added.length || r.updated.length) log({ type: 'ledger-put', added: r.added.length, updated: r.updated.length, seenBefore: r.seenBefore, initial: !!opt.initial });
           return r;
         },

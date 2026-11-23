@@ -122,6 +122,14 @@ tool('ledger_fires', '「起こす条件」が最近出した知らせ（id・�
   { limit: z.number().int().min(1).max(200).optional() },
   async (a) => text(JSON.stringify(await daemon.call('ledger.fires', { affiliation: affiliation(), limit: a.limit }), null, 2)));
 
+tool('send_message', '部屋（台帳の stream）に本文を送る。設定（outbox）で許した部屋だけ。拡張が画面でそのまま送り、台帳に自分の発言として本文が完全一致で入れば confirmed、時間内に入らなければ unconfirmed（送れていても確かめられていない）、送れなければ failed を返す。同じ部屋に同じ本文を少し前に送っていれば断る（unconfirmed のあとに送り直して二重に届くのを防ぐ）。',
+  { stream: z.string(), text: z.string(), allow_repeat: z.boolean().optional().describe('同じ本文を少し前に送っていても、本当に送り直す') },
+  async (a) => text(JSON.stringify(await daemon.call('outbox.send', { affiliation: affiliation(), stream: a.stream, text: a.text, by: mySession(), allowRepeat: a.allow_repeat }), null, 2)));
+
+tool('outbox_list', '最近の預け（送る口）と、その状態（confirmed / unconfirmed / failed / sending）の数。',
+  { limit: z.number().int().min(1).max(200).optional() },
+  async (a) => text(JSON.stringify(await daemon.call('outbox.list', { affiliation: affiliation(), limit: a.limit }), null, 2)));
+
 tool('watari_status', '渡の常駐の状態（所属ごとの Chrome・窓・拡張・拡張を読めなかった記録）。窓の stale が true なら、画面も通信も長く動いていない（見えていないかもしれない）。gaps は拡張が「取りこぼしたかもしれない」と報告した数。',
   {},
   async () => text(JSON.stringify(await daemon.call('status'), null, 2)));
