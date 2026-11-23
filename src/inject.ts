@@ -60,6 +60,8 @@ const RUNTIME = `(() => {
     h.addEventListener('click', () => { g.__watariShowTouching(!touching); send({ type: 'touch', on: touching }); });
     root.querySelector('.x').addEventListener('click', () => root.querySelector('.t').classList.toggle('f'));
     document.documentElement.appendChild(host);
+    // 名札の名前の部分の位置（閉じるボタンの問いを出せるよう、渡がここを 1 回押して「触った」状態にする。押しても何も起きない）
+    g.__watariTagNameRect = () => { const r = nameEl.getBoundingClientRect(); return r.width && r.height ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null; };
   };
 
   // 見張り

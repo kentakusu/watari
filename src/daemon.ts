@@ -80,6 +80,8 @@ export async function startDaemon(opts: DaemonOptions) {
       // 毎回読む（設定の triggers を書き換えれば、常駐を起こし直さなくても次の発言から効く）
       triggerConfig: () => triggerConfigOf(name),
       outboxConfig: () => { const o = readConfig(home).outbox; return o?.[name] ?? o?.['*']; },
+      // keepOpen の窓は、閉じるボタンを押されても閉じずに最小化して裏で動かす
+      closeToBackground: (session) => keepOpenList(readConfig(home).keepOpen).includes(session),
     });
     a.onWindowsChanged = () => saveWindows();
     a.onWindowClosed = (w) => void onLost(a, [w], 'window');
