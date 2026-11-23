@@ -210,9 +210,19 @@ test('台帳: 拡張が入れた発言で起こし（本文なし）、MCP で�
   assert.equal(fires.stats.delivered, 1);
   assert.equal(fires.stats.aiUnreadFires, 1);
 
-  const read = JSON.parse(textOf(await call(mcp, 'ledger_read', { stream: 'room-a', id: unread.items[0].id })));
+  // 知らせの 1 行の id だけで、その知らせに入った発言をまとめて読む
+  const triggerId = Number(fire.text.match(/trigger id=(\d+)/)![1]);
+  const byTrigger = JSON.parse(textOf(await call(mcp, 'ledger_read', { trigger_id: triggerId })));
+  assert.equal(byTrigger.trigger.id, triggerId);
+  assert.deepEqual(byTrigger.trigger.rules, ['toMe']);
+  assert.deepEqual(byTrigger.missing, []);
+  assert.equal(byTrigger.reads.length, 1);
+  const read = byTrigger.reads[0];
   assert.equal(read.item.text, '鈴木さん宛ての相談です');
   assert.ok(read.item.aiReadAt);
+  const noFire = await call(mcp, 'ledger_read', { trigger_id: 99999 });
+  assert.equal(noFire.isError, true);
+  assert.match(textOf(noFire), /その知らせはありません/);
   assert.equal(JSON.parse(textOf(await call(mcp, 'ledger_unread', { for_me_only: true }))).items.length, 0);
   fires = JSON.parse(textOf(await call(mcp, 'ledger_fires')));
   assert.equal(fires.stats.aiUnreadFires, 0);

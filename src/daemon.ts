@@ -193,7 +193,23 @@ export async function startDaemon(opts: DaemonOptions) {
     },
     'ledger.read': async (p) => {
       const name = affName(p.affiliation);
-      if (typeof p.stream !== 'string' || typeof p.id !== 'string') throw new Error('stream と id が要ります');
+      if (p.triggerId !== undefined) {
+        // 知らせの番号だけで、その知らせに入った発言をまとめて読む（知らせの 1 行には trigger id しか無いため）
+        const L = ledgerOf(name);
+        let fire: any;
+        try { fire = L.db.prepare('SELECT id, at, stream, stream_name, rules, kind, items_json FROM fires WHERE id = ?').get(Number(p.triggerId)); }
+        catch { fire = undefined; }
+        if (!fire) throw new Error(`その知らせはありません: trigger id=${p.triggerId}`);
+        const items = JSON.parse(fire.items_json) as Array<{ stream: string; id: string }>;
+        const reads: unknown[] = [];
+        const missing: Array<{ stream: string; id: string }> = [];
+        for (const it of items) {
+          const r = L.read(it.stream, it.id, p.context ?? 3);
+          if (r) reads.push(r); else missing.push(it); // 保持の日数で消えたもの
+        }
+        return { trigger: { id: fire.id, at: fire.at, stream: fire.stream, streamName: fire.stream_name ?? undefined, rules: fire.rules ? fire.rules.split(',') : [], kind: fire.kind }, reads, missing };
+      }
+      if (typeof p.stream !== 'string' || typeof p.id !== 'string') throw new Error('stream と id か、trigger_id が要ります');
       const r = ledgerOf(name).read(p.stream, p.id, p.context ?? 5);
       if (!r) throw new Error(`台帳にその発言はありません: ${p.stream} / ${p.id}`);
       return r;
