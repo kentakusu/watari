@@ -1,0 +1,167 @@
+// 常駐（daemon）と MCP サーバーを、本物の MCP client から端まで通す。
+import { test, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { createServer, type Server } from 'node:http';
+import { readFileSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join, dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { startDaemon } from '../src/daemon.ts';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const root = resolve(here, '..');
+const home = process.env.WATARI_TEST_HOME ? join(process.env.WATARI_TEST_HOME, 'daemon') : join(root, '.test-home', 'daemon');
+const port = 20000 + Math.floor(Math.random() * 20000);
+const notes: Array<{ session: string; text: string }> = [];
+
+let site: Server;
+let siteUrl = '';
+let daemon: Awaited<ReturnType<typeof startDaemon>>;
+let mcp: Client;
+
+const waitFor = async (cond: () => boolean | Promise<boolean>, ms = 15000, what = '条件') => {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { if (await cond()) return; await new Promise((r) => setTimeout(r, 100)); }
+  throw new Error(`${ms}ms 待っても ${what} になりません`);
+};
+
+// 紡の環境変数を持ち込まない（持ち込むと、試験の外のセッション名で動く）
+const cleanEnv = () => Object.fromEntries(Object.entries(process.env).filter(([k, v]) => !k.startsWith('TSUMUGI_') && v !== undefined)) as Record<string, string>;
+
+async function connect(args: string[]): Promise<Client> {
+  const c = new Client({ name: 'watari-test', version: '0' });
+  await c.connect(new StdioClientTransport({ command: process.execPath, args: [join(root, 'src', 'mcp.ts'), '--home', home, ...args], env: cleanEnv(), stderr: 'pipe' }));
+  return c;
+}
+
+const call = async (c: Client, name: string, args: Record<string, unknown> = {}) => (await c.callTool({ name, arguments: args })) as any;
+const textOf = (r: any) => r.content.map((x: any) => x.text ?? '').join('');
+
+before(async () => {
+  rmSync(home, { recursive: true, force: true });
+  mkdirSync(home, { recursive: true });
+  writeFileSync(join(home, 'config.json'), JSON.stringify({ port }));
+  const html = readFileSync(join(here, 'fixtures', 'inbox.html'), 'utf8');
+  site = createServer((req, res) => {
+    const u = new URL(req.url ?? '/', 'http://x');
+    const arrive = u.searchParams.get('arrive');
+    const extra = arrive ? `<script>setTimeout(() => arrive(${JSON.stringify(arrive)}), 1500)</script>` : '';
+    res.setHeader('content-type', 'text/html; charset=utf-8');
+    res.end(html.replace('</body>', `${extra}</body>`));
+  });
+  await new Promise<void>((r) => site.listen(0, '127.0.0.1', () => r()));
+  siteUrl = `http://127.0.0.1:${(site.address() as any).port}/`;
+  daemon = await startDaemon({ home, headless: true, missingGraceMs: 300, notifyOverride: async (session, text) => { notes.push({ session, text }); } });
+  mcp = await connect(['--session', 'test/mcp']);
+});
+
+after(async () => {
+  await mcp?.close();
+  await daemon?.stop();
+  site?.close();
+  if (!process.env.WATARI_KEEP_TEST_HOME) rmSync(home, { recursive: true, force: true });
+});
+
+test('口: 合言葉なしでは断る・生死の確認だけは通す', async () => {
+  const health = await fetch(`http://127.0.0.1:${port}/health`);
+  assert.equal(health.status, 200);
+  const noToken = await fetch(`http://127.0.0.1:${port}/rpc`, { method: 'POST', body: JSON.stringify({ method: 'status' }) });
+  assert.equal(noToken.status, 401);
+  const wrong = await fetch(`http://127.0.0.1:${port}/rpc`, { method: 'POST', headers: { authorization: 'Bearer x' }, body: JSON.stringify({ method: 'status' }) });
+  assert.equal(wrong.status, 401);
+});
+
+test('MCP の道具がそろっている', async () => {
+  const names = (await mcp.listTools()).tools.map((t) => t.name).sort();
+  for (const n of ['open_window', 'window_info', 'read', 'click', 'type_text', 'press_key', 'screenshot', 'set_label', 'list_extensions', 'install_extension', 'remove_extension', 'watari_status']) {
+    assert.ok(names.includes(n), `${n} がありません: ${names.join(',')}`);
+  }
+});
+
+test('窓を開いて読み・入れ・押し・画像を撮る', async () => {
+  const r = await call(mcp, 'open_window', { url: siteUrl, label: '試験の窓' });
+  assert.ok(!r.isError, textOf(r));
+  await waitFor(async () => !(await call(mcp, 'window_info')).isError, 15000, '窓の見張りが立つ');
+  const info = JSON.parse(textOf(await call(mcp, 'window_info')));
+  assert.equal(info.title, '試験用の受信箱');
+  assert.equal(info.label, '試験の窓');
+  assert.ok(!(await call(mcp, 'type_text', { selector: '#msg', text: 'MCP から' })).isError);
+  assert.ok(!(await call(mcp, 'click', { selector: '#send' })).isError);
+  assert.deepEqual(JSON.parse(textOf(await call(mcp, 'read', { selector: '#log li' }))), { text: 'MCP から' });
+  const shot = await call(mcp, 'screenshot');
+  assert.equal(shot.content[0].type, 'image');
+  assert.ok(Buffer.from(shot.content[0].data, 'base64').subarray(1, 4).toString() === 'PNG');
+});
+
+test('無い要素を押すと失敗として返る（黙って成功しない）', async () => {
+  const r = await call(mcp, 'click', { selector: '#nai' });
+  assert.equal(r.isError, true);
+  assert.match(textOf(r), /見つかりません/);
+});
+
+test('形の違う拡張は入れずに断る', async () => {
+  const p = join(home, 'bad-ext.mjs');
+  writeFileSync(p, 'export default { name: "bad", sites: [], watch: [], onChange() {} };');
+  const r = await call(mcp, 'install_extension', { path: p });
+  assert.equal(r.isError, true);
+  assert.match(textOf(r), /sites が空/);
+  assert.equal(JSON.parse(textOf(await call(mcp, 'list_extensions'))).length, 0);
+});
+
+test('拡張を入れると窓で動き、通知はその窓のセッションへ行く', async () => {
+  const p = join(root, 'examples', 'badge-watch', 'index.ts');
+  const r = await call(mcp, 'install_extension', { path: p });
+  assert.ok(!r.isError, textOf(r));
+  const rec = JSON.parse(textOf(r));
+  assert.equal(rec.installedBy, 'test/mcp');
+  assert.equal(rec.affiliation, 'test');
+  // 入れたあとに開いた文書で効くことを見る（読み直さずに効くことは e2e の試験で見る）
+  await call(mcp, 'open_window', { url: `${siteUrl}?arrive=${encodeURIComponent('拡張から')}` });
+  await waitFor(() => notes.some((n) => n.text.includes('最新: 拡張から')), 15000, '拡張の通知');
+  assert.equal(notes.find((n) => n.text.includes('最新: 拡張から'))!.session, 'test/mcp');
+});
+
+test('拡張を外すと、もう動かない', async () => {
+  assert.ok(!(await call(mcp, 'remove_extension', { name: 'badge-watch' })).isError);
+  const before = notes.length;
+  await call(mcp, 'open_window', { url: `${siteUrl}?arrive=${encodeURIComponent('外したあと')}` });
+  await new Promise((r) => setTimeout(r, 3500));
+  assert.equal(notes.length, before, notes.slice(before).map((n) => n.text).join('\n'));
+});
+
+test('セッション名が分からない MCP は、黙らずに失敗を返す', async () => {
+  const anon = await connect([]);
+  try {
+    const r = await call(anon, 'window_info');
+    assert.equal(r.isError, true);
+    assert.match(textOf(r), /セッションの名前が分かりません/);
+  } finally { await anon.close(); }
+});
+
+test('状態に所属・窓・拡張が出る', async () => {
+  const s = JSON.parse(textOf(await call(mcp, 'watari_status')));
+  const a = s.affiliations.find((x: any) => x.name === 'test');
+  assert.ok(a?.running);
+  assert.deepEqual(a.windows.map((w: any) => w.session), ['test/mcp']);
+  assert.deepEqual(a.extensions, []);
+});
+
+test('常駐を起こし直すと、開いていた窓が開き直される', async () => {
+  await daemon.stop();
+  daemon = await startDaemon({ home, headless: true, missingGraceMs: 300, notifyOverride: async (session, text) => { notes.push({ session, text }); } });
+  const s = JSON.parse(textOf(await call(mcp, 'watari_status')));
+  assert.deepEqual(s.restoreErrors, []);
+  const a = s.affiliations.find((x: any) => x.name === 'test');
+  assert.deepEqual(a?.windows.map((w: any) => [w.session, w.label]), [['test/mcp', '試験の窓']]);
+  await waitFor(async () => !(await call(mcp, 'window_info')).isError, 15000, '開き直した窓の見張りが立つ');
+  assert.equal(JSON.parse(textOf(await call(mcp, 'window_info'))).title, '試験用の受信箱');
+});
+
+test('人が所属を止めたら、その窓は次から開き直さない', async () => {
+  await daemon.methods['affiliation.stop']({ name: 'test' });
+  await daemon.stop();
+  daemon = await startDaemon({ home, headless: true, missingGraceMs: 300, notifyOverride: async () => {} });
+  const s = JSON.parse(textOf(await call(mcp, 'watari_status')));
+  assert.deepEqual(s.affiliations, []);
+});

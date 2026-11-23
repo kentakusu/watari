@@ -1,0 +1,84 @@
+// Claude のセッションごとに立つ MCP サーバー（stdio）。常駐の渡へつなぎ、自分のセッションの窓だけを操る。
+// セッション名は --session か、紡の環境変数（TSUMUGI_AFFILIATION / TSUMUGI_SESSION）から取る。
+//
+//   claude mcp add watari -- node <repo>/src/mcp.ts --home D:\watari
+import { parseArgs } from 'node:util';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { z } from 'zod';
+import { client } from './client.ts';
+import { resolveHome } from './home.ts';
+
+const { values } = parseArgs({ options: { home: { type: 'string' }, session: { type: 'string' } }, strict: false });
+const home = resolveHome(values.home as string | undefined);
+const envSession = process.env.TSUMUGI_AFFILIATION && process.env.TSUMUGI_SESSION ? `${process.env.TSUMUGI_AFFILIATION}/${process.env.TSUMUGI_SESSION}` : undefined;
+const session = (values.session as string | undefined) ?? envSession;
+const daemon = client(home);
+
+const text = (t: string) => ({ content: [{ type: 'text' as const, text: t }] });
+const fail = (e: any) => ({ content: [{ type: 'text' as const, text: `失敗: ${e?.message ?? e}` }], isError: true });
+
+function mySession(): string {
+  if (!session) throw new Error('このセッションの名前が分かりません。紡の外で使うなら MCP の引数に --session 所属/名前 を足してください');
+  return session;
+}
+const affiliation = () => mySession().split('/')[0];
+
+/** 道具を 1 つ足す。失敗は isError で返す（黙って空を返さない）。 */
+function tool<S extends z.ZodRawShape>(name: string, description: string, shape: S, run: (a: z.infer<z.ZodObject<S>>) => Promise<any>) {
+  server.registerTool(name, { description, inputSchema: shape }, (async (args: any) => {
+    try { return await run(args); } catch (e) { return fail(e); }
+  }) as any);
+}
+
+const server = new McpServer({ name: 'watari', version: '0.0.0' });
+
+tool('open_window', 'このセッション専用の窓を開く（もう開いていればその窓で URL を開く）。所属の Chrome が止まっていれば起こす。人がその窓でログインすれば、ログインは同じ所属の全セッションで共有される。',
+  { url: z.string().describe('開く URL（http/https）'), label: z.string().optional().describe('窓の名札に出す名前。省くとセッション名') },
+  async (a) => text(JSON.stringify(await daemon.call('window.open', { session: mySession(), url: a.url, label: a.label }))));
+
+tool('window_info', '窓の URL・題・本文のテキスト（先頭から）・人が「今触ってる」か・最後に画面が動いた時刻を返す。',
+  { max_text: z.number().int().min(0).max(100000).optional() },
+  async (a) => text(JSON.stringify(await daemon.call('window.info', { session: mySession(), maxText: a.max_text ?? 4000 }), null, 2)));
+
+tool('read', 'セレクタに当たる最初の要素のテキストを返す。見つからなければ null。',
+  { selector: z.string() },
+  async (a) => text(JSON.stringify(await daemon.call('window.read', { session: mySession(), selector: a.selector }))));
+
+tool('click', 'セレクタに当たる要素の真ん中をクリックする（人のクリックと同じ扱い）。人が「今触ってる」の間は待つ。',
+  { selector: z.string() },
+  async (a) => { await daemon.call('window.click', { session: mySession(), selector: a.selector }); return text('押しました'); });
+
+tool('type_text', 'セレクタに当たる入力欄をクリックしてから文字を入れる。送信は別に click か press_key で。',
+  { selector: z.string(), text: z.string() },
+  async (a) => { await daemon.call('window.type', { session: mySession(), selector: a.selector, text: a.text }); return text('入れました'); });
+
+tool('press_key', 'キーを 1 回押す。modifiers は Alt=1, Ctrl=2, Meta=4, Shift=8 の和（例: Shift+Enter は 8）。',
+  { key: z.enum(['Enter', 'Backspace', 'Tab', 'Escape']), modifiers: z.number().int().min(0).max(15).optional() },
+  async (a) => { await daemon.call('window.press', { session: mySession(), key: a.key, modifiers: a.modifiers ?? 0 }); return text('押しました'); });
+
+tool('screenshot', '窓の見えている範囲を画像で返す。',
+  {},
+  async () => ({ content: [{ type: 'image' as const, data: (await daemon.call('window.screenshot', { session: mySession() })).png, mimeType: 'image/png' }] }));
+
+tool('set_label', '窓の名札の名前を変える。',
+  { label: z.string().min(1).max(60) },
+  async (a) => { await daemon.call('window.label', { session: mySession(), label: a.label }); return text('変えました'); });
+
+tool('list_extensions', 'このセッションの所属に入っている拡張の一覧（誰が・いつ入れたか付き）。',
+  {},
+  async () => text(JSON.stringify(await daemon.call('extension.list', { affiliation: affiliation() }), null, 2)));
+
+tool('install_extension', '拡張を所属に入れる（同じ名前があれば入れ替える）。同じ所属の開いている窓すべてにその場で効く。path はこの機械の上の絶対パス。',
+  { path: z.string() },
+  async (a) => text(JSON.stringify(await daemon.call('extension.install', { affiliation: affiliation(), path: a.path, by: mySession() }))));
+
+tool('remove_extension', '拡張を所属から外す。',
+  { name: z.string() },
+  async (a) => { await daemon.call('extension.remove', { affiliation: affiliation(), name: a.name, by: mySession() }); return text('外しました'); });
+
+tool('watari_status', '渡の常駐の状態（所属ごとの Chrome・窓・拡張・拡張を読めなかった記録）。',
+  {},
+  async () => text(JSON.stringify(await daemon.call('status'), null, 2)));
+
+await server.connect(new StdioServerTransport());

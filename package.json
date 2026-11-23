@@ -9,12 +9,19 @@
     "node": ">=23.6"
   },
   "scripts": {
-    "start": "node src/main.ts",
     "test": "node --test --test-concurrency=1 test/",
-    "check": "tsc -p ."
+    "check": "tsc -p .",
+    "tray": "electron electron/main.mjs",
+    "daemon": "node src/daemon.ts",
+    "mcp": "node src/mcp.ts"
   },
   "devDependencies": {
     "@types/node": "^24.19.2",
+    "electron": "^45.4.1",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
   }
 }
