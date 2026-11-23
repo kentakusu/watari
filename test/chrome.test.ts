@@ -17,9 +17,11 @@ const killAll = (dir: string) => { for (const p of chromesOnProfile(dir)) { try 
 
 const dirs: string[] = [];
 after(async () => {
+  // 止めた Chrome がファイルを離すまで待ってから消す（すぐ消すと EPERM になることがあった）
   for (const d of dirs) killAll(d);
-  await sleep(1500);
-  for (const d of dirs) rmSync(d, { recursive: true, force: true });
+  const end = Date.now() + 15000;
+  while (dirs.some((d) => chromesOnProfile(d).length) && Date.now() < end) { for (const d of dirs) killAll(d); await sleep(500); }
+  for (const d of dirs) rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
 });
 
 test('渡が落ちた直後に起こし直しても、起きる', async () => {

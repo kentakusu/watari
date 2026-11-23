@@ -8,6 +8,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { client } from './client.ts';
 import { resolveHome } from './home.ts';
+import { pathForDaemon } from './paths.ts';
 
 const { values } = parseArgs({ options: { home: { type: 'string' }, session: { type: 'string' } }, strict: false });
 const home = resolveHome(values.home as string | undefined);
@@ -69,9 +70,9 @@ tool('list_extensions', 'このセッションの所属に入っている拡張�
   {},
   async () => text(JSON.stringify(await daemon.call('extension.list', { affiliation: affiliation() }), null, 2)));
 
-tool('install_extension', '拡張を所属に入れる（同じ名前があれば入れ替える）。同じ所属の開いている窓すべてにその場で効く。path はこの機械の上の絶対パス。',
+tool('install_extension', '拡張を所属に入れる（同じ名前があれば入れ替える）。同じ所属の開いている窓すべてにその場で効く。path は絶対パス（WSL からは /mnt/<ドライブ>/ の下）。',
   { path: z.string() },
-  async (a) => text(JSON.stringify(await daemon.call('extension.install', { affiliation: affiliation(), path: a.path, by: mySession() }))));
+  async (a) => text(JSON.stringify(await daemon.call('extension.install', { affiliation: affiliation(), path: pathForDaemon(a.path), by: mySession() }))));
 
 tool('remove_extension', '拡張を所属から外す。',
   { name: z.string() },

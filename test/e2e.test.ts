@@ -10,12 +10,14 @@ import badgeWatch from '../examples/badge-watch/index.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 // 既定は作業ツリーの中（.test-home は .gitignore 済み）。C: が小さい機では D: に置ける
-const home = process.env.WATARI_TEST_HOME ?? join(here, '..', '.test-home');
+// 試験のファイルごとに置き場を分ける（ほかの試験の Chrome がつかんでいるものを消さないように）
+const home = process.env.WATARI_TEST_HOME ? join(process.env.WATARI_TEST_HOME, 'e2e') : join(here, '..', '.test-home', 'e2e');
 
 let server: Server;
 let aff: Affiliation;
 let win: SessionWindow;
 const notes: string[] = [];
+const sentTo: string[] = [];
 let outsiderCalls = 0;
 
 // 宣言していないサイトの拡張（陰性対照）: 同じ #badge を見張るが、sites が当たらない
@@ -42,13 +44,13 @@ const page = async (expression: string) => {
 };
 
 before(async () => {
-  rmSync(home, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
   mkdirSync(home, { recursive: true });
   const html = readFileSync(join(here, 'fixtures', 'inbox.html'));
   server = createServer((_, res) => { res.setHeader('content-type', 'text/html; charset=utf-8'); res.end(html); });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
   const port = (server.address() as any).port;
-  aff = new Affiliation({ name: 'test', home, headless: true, missingGraceMs: 300, notifier: async (_s, t) => { notes.push(t); } });
+  aff = new Affiliation({ name: 'test', home, headless: true, missingGraceMs: 300, notifier: async (s, t) => { notes.push(t); sentTo.push(s); } });
   await aff.start();
   await aff.setExtensions([badgeWatch, outsider]);
   win = await aff.openWindow('test/e2e', `http://127.0.0.1:${port}/`, '試験');
@@ -59,7 +61,7 @@ before(async () => {
 after(async () => {
   await aff?.stop();
   server?.close();
-  if (!process.env.WATARI_KEEP_TEST_HOME) rmSync(home, { recursive: true, force: true });
+  if (!process.env.WATARI_KEEP_TEST_HOME) rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
 });
 
 test('バッジに数字が入ると、拡張が読み・入力し・押し・知らせる', async () => {
@@ -114,6 +116,28 @@ test('拡張はページを読み直さずに出し入れできる', async () =>
   assert.equal(notes.length, before, notes.slice(before).join('\n'));
   assert.equal(await page('performance.getEntriesByType("navigation").length'), navigations);
   assert.equal(await page('window.sawWatari'), false, 'ページが読み直されている');
+});
+
+test('拡張は全部の行を読め、通知の宛先を窓のセッションと別に決められる', async () => {
+  const reader: Extension = {
+    name: 'reader',
+    sites: ['http://127.0.0.1:*/*'],
+    watch: [{ name: '最新', selector: '#latest' }],
+    notifyTo: 'other/someone',
+    async onChange(e, w) {
+      if (e.value !== '三通目') return;
+      await w.waitFor('#log li');
+      const all = await w.readAll('#log li');
+      const ids = await w.attrAll('#log li', 'data-x');
+      await w.notify(`行: ${all.join('|')} / 属性: ${JSON.stringify(ids)}`);
+    },
+  };
+  await aff.setExtensions([reader]);
+  const before = notes.length;
+  await page('document.getElementById("latest").textContent = "三通目"');
+  await waitFor(() => notes.length > before, 10000, '通知');
+  assert.equal(sentTo.at(-1), 'other/someone');
+  assert.match(notes.at(-1)!, /^行: 受け取りました\|受け取りました \/ 属性: \[null,null\]$/);
 });
 
 test('記録が残る（窓を開いた・見張りの変化・押した・知らせた）', () => {

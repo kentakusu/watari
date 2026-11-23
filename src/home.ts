@@ -7,8 +7,11 @@ import { join, resolve } from 'node:path';
 export type Config = {
   /** 常駐が待ち受ける 127.0.0.1 の口 */
   port: number;
-  /** 通知のコマンド（本文は標準入力）。無ければ記録に残すだけ */
-  notify?: string[];
+  /**
+   * 通知のコマンド（本文は標準入力）。無ければ常駐の標準出力に出すだけ。
+   * 所属ごとに変えるときは { "所属": [...], "*": [...] }（例: 所属ごとに別の 紡 が持っている）
+   */
+  notify?: string[] | Record<string, string[]>;
   missingGraceMs?: number;
   headless?: boolean;
 };

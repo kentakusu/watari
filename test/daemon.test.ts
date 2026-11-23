@@ -39,7 +39,7 @@ const call = async (c: Client, name: string, args: Record<string, unknown> = {})
 const textOf = (r: any) => r.content.map((x: any) => x.text ?? '').join('');
 
 before(async () => {
-  rmSync(home, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
   mkdirSync(home, { recursive: true });
   writeFileSync(join(home, 'config.json'), JSON.stringify({ port }));
   const html = readFileSync(join(here, 'fixtures', 'inbox.html'), 'utf8');
@@ -60,7 +60,7 @@ after(async () => {
   await mcp?.close();
   await daemon?.stop();
   site?.close();
-  if (!process.env.WATARI_KEEP_TEST_HOME) rmSync(home, { recursive: true, force: true });
+  if (!process.env.WATARI_KEEP_TEST_HOME) rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
 });
 
 test('口: 合言葉なしでは断る・生死の確認だけは通す', async () => {

@@ -56,7 +56,27 @@ C: が小さい機では D: を指してください。
 | `profiles/<所属>/` | 所属ごとの Chrome のプロファイル（ログインが残る） |
 | `log/<所属>.jsonl` | 記録（見張りの変化・操作・通知・失敗） |
 
-`notify` は通知のコマンドです。本文を標準入力で渡します。`{session}`（`<所属>/<名前>`）・`{affiliation}`・`{name}` が置き換わります。紡なら `["tsumugi","届ける","{name}"]`。無ければ常駐の標準出力（`log/daemon.out`）に出します。
+`notify` は通知のコマンドです。本文を標準入力で渡します。`{session}`（`<所属>/<名前>`）・`{affiliation}`・`{name}` が置き換わります。紡なら `["tsumugi","届ける","{name}"]`。無ければ常駐の標準出力（`log/daemon.out`）に出します。所属ごとに届け先が違うなら表で書きます（`"*"` はそのほか全部）。
+
+```json
+{
+  "notify": {
+    "kenta": ["tsumugi", "届ける", "{name}"],
+    "reatex": ["wsl.exe", "-d", "Reatex", "-e", "bash", "-lc", "exec tsumugi 届ける \"$0\"", "{name}"]
+  }
+}
+```
+
+### WSL のセッションから使う
+
+常駐は Windows で 1 つだけ動かし、WSL の Claude からは WSL の中の Node で MCP を動かします（`networkingMode=Mirrored` なら `127.0.0.1` で常駐に届きます）。
+
+```
+claude mcp add watari --scope user -- node /mnt/d/watari/app/src/mcp.ts --home /mnt/d/watari
+```
+
+- 拡張は `/mnt/<ドライブ>/` の下に置きます（MCP が Windows の道のりに直して常駐へ渡します）。WSL の中だけにある場所は断ります。
+- WSL の 紡 へ通知するときは `wsl.exe -e`（`--` ではなく）を使います。`--` だと既定のシェルを一度通り、`"$0"` などが先に展開されて名前が化けます（実測: `/usr/bin/zsh` になった）。
 
 ## 拡張の書き方
 

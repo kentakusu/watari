@@ -19,10 +19,18 @@ export type Key = 'Enter' | 'Backspace' | 'Tab' | 'Escape';
 export type WindowApi = {
   session: string;
   label: string;
+  /** 最初に当たる要素のテキスト。無ければ null */
   read(selector: string): Promise<string | null>;
+  /** 当たる要素すべてのテキスト（画面に描かれているものだけ） */
+  readAll(selector: string): Promise<string[]>;
+  /** 当たる要素すべての属性 */
+  attrAll(selector: string, name: string): Promise<Array<string | null>>;
+  /** 要素が出てくるまで待つ。出てこなければ NotFound */
+  waitFor(selector: string, ms?: number): Promise<void>;
   click(selector: string): Promise<void>;
   type(selector: string, text: string): Promise<void>;
   press(key: Key, modifiers?: number): Promise<void>;
+  /** 拡張の notifyTo（無ければ窓のセッション）へ知らせる */
   notify(text: string): Promise<void>;
 };
 
@@ -30,6 +38,8 @@ export type Extension = {
   name: string;
   sites: string[];
   watch: WatchSpec[];
+  /** 通知の宛先（所属/名前）。省くと、その窓のセッション */
+  notifyTo?: string;
   onChange(e: WatchEvent, w: WindowApi): Promise<void> | void;
 };
 
@@ -243,7 +253,7 @@ export class SessionWindow {
   }
 
   async #dispatch(ext: Extension, msg: any): Promise<void> {
-    const api = this.#api(ext.name);
+    const api = this.#api(ext);
     if (msg.missing) {
       // 見つからないことを黙らせない（「何も来ていない」と区別するため）
       await api.notify(`【渡 ${ext.name}】見張っている「${msg.name}」が画面に見つかりません（サイトの作りが変わったか、まだ表示されていないか、ログインが切れたかもしれません）: ${msg.url}`).catch(() => {});
@@ -336,19 +346,31 @@ export class SessionWindow {
   };
 
   /** 拡張に渡す道具。拡張の処理はもう列の中にいるので、#serial は通さない。 */
-  #api(ext: string): WindowApi {
+  #api(extension: Extension): WindowApi {
+    const ext = extension.name;
     const log = (rec: object) => this.#logAct(ext, { ext, ...rec });
+    const to = extension.notifyTo ?? this.session;
     return {
       session: this.session,
       label: this.#label,
       read: (selector) => this.#read(selector),
+      readAll: (selector) => this.#eval(`[...document.querySelectorAll(${JSON.stringify(selector)})].map((el) => (el.textContent || '').trim())`),
+      attrAll: (selector, name) => this.#eval(`[...document.querySelectorAll(${JSON.stringify(selector)})].map((el) => el.getAttribute(${JSON.stringify(name)}))`),
+      waitFor: async (selector, ms = 10000) => {
+        const end = Date.now() + ms;
+        while (Date.now() < end) {
+          if (await this.#eval(`!!document.querySelector(${JSON.stringify(selector)})`).catch(() => false)) return;
+          await new Promise((r) => setTimeout(r, 200));
+        }
+        throw new NotFound(`${ms}ms 待っても出てきません: ${selector}`);
+      },
       click: async (selector) => { await this.#click(selector); log({ type: 'click', selector }); },
       type: async (selector, text) => { await this.#type(selector, text); log({ type: 'type', selector, length: text.length }); },
       press: async (key, modifiers = 0) => { await this.#press(key, modifiers); log({ type: 'press', key, modifiers }); },
       notify: async (text) => {
-        log({ type: 'notify', text });
+        log({ type: 'notify', to, text });
         try {
-          await this.#aff.notifier(this.session, text);
+          await this.#aff.notifier(to, text);
         } catch (e: any) {
           log({ type: 'notify-failed', error: String(e?.message ?? e) });
           throw e;
