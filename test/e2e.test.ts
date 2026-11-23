@@ -48,9 +48,10 @@ before(async () => {
   server = createServer((_, res) => { res.setHeader('content-type', 'text/html; charset=utf-8'); res.end(html); });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
   const port = (server.address() as any).port;
-  aff = new Affiliation({ name: 'test', home, headless: true, notifier: async (_s, t) => { notes.push(t); } });
+  aff = new Affiliation({ name: 'test', home, headless: true, missingGraceMs: 300, notifier: async (_s, t) => { notes.push(t); } });
   await aff.start();
-  win = await aff.openWindow('test/e2e', `http://127.0.0.1:${port}/`, [badgeWatch, outsider], '試験');
+  await aff.setExtensions([badgeWatch, outsider]);
+  win = await aff.openWindow('test/e2e', `http://127.0.0.1:${port}/`, '試験');
   await waitFor(async () => (await page('document.readyState')) === 'complete', 10000, 'ページの読み込み完了');
   await waitFor(async () => (await page('!!document.querySelector("watari-tag")')) === true, 10000, '名札の表示');
 });
@@ -95,6 +96,24 @@ test('見張っている要素が消えたら「見つかりません」と知�
   await page('document.getElementById("badge").remove()');
   await waitFor(() => notes.some((n) => n.includes('見つかりません')), 10000, '見つからない通知');
   assert.ok(notes.some((n) => n.includes('badge-watch') && n.includes('未読')));
+});
+
+test('拡張はページを読み直さずに出し入れできる', async () => {
+  // 見つからない試験で #badge を消したので、作り直す（ページは読み直さない）
+  await page('const h = document.querySelector("h1"); const b = document.createElement("span"); b.id = "badge"; b.textContent = "0"; h.appendChild(b)');
+  const seen: string[] = [];
+  const titleWatch: Extension = { name: 'title-watch', sites: ['http://127.0.0.1:*/*'], watch: [{ name: '最新', selector: '#latest' }], onChange(e) { seen.push(String(e.value)); } };
+  const navigations = await page('performance.getEntriesByType("navigation").length');
+  await aff.setExtensions([titleWatch]);
+  await page('document.getElementById("latest").textContent = "差し替えのあと"');
+  await waitFor(() => seen.includes('差し替えのあと'), 10000, '入れた拡張が動く');
+  // 外した拡張（badge-watch）はもう動かない
+  const before = notes.length;
+  await page('arrive("外したあと")');
+  await new Promise((r) => setTimeout(r, 1000));
+  assert.equal(notes.length, before, notes.slice(before).join('\n'));
+  assert.equal(await page('performance.getEntriesByType("navigation").length'), navigations);
+  assert.equal(await page('window.sawWatari'), false, 'ページが読み直されている');
 });
 
 test('記録が残る（窓を開いた・見張りの変化・押した・知らせた）', () => {
