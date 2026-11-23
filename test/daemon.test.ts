@@ -2,7 +2,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
-import { readFileSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, rmSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -215,6 +215,12 @@ test('台帳: 拡張が入れた発言で起こし（本文なし）、MCP で�
   fires = JSON.parse(textOf(await call(mcp, 'ledger_fires')));
   assert.equal(fires.stats.aiUnreadFires, 0);
   assert.ok(!(await call(mcp, 'remove_extension', { name: 'ledger-ext' })).isError);
+});
+
+test('台帳の無い所属を読んでも、台帳のファイルを作らない', async () => {
+  const r = await daemon.methods['ledger.search']({ affiliation: 'no-ledger', q: '何か' }).then(() => null, (e: Error) => e.message);
+  assert.match(String(r), /まだ台帳がありません/);
+  assert.ok(!existsSync(join(home, 'ledger', 'no-ledger.db')), '読んだだけで台帳のファイルができた');
 });
 
 test('台帳に無い発言を読もうとすると、黙らずに失敗を返す', async () => {

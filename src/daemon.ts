@@ -98,6 +98,8 @@ export async function startDaemon(opts: DaemonOptions) {
   function ledgerOf(name: string): Ledger {
     const a = affiliations.get(name);
     if (a?.running) return a.ledger();
+    // 読むだけのときに、台帳の無い所属にファイルを作らない
+    if (!existsSync(join(home, 'ledger', `${name}.db`))) throw new Error(`所属 ${name} には、まだ台帳がありません（拡張が発言を入れると作られます）`);
     let l = standaloneLedgers.get(name);
     if (!l) { l = new Ledger(home, name); standaloneLedgers.set(name, l); }
     return l;
