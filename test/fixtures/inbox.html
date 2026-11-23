@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="ja">
+<head><meta charset="utf-8"><title>試験用の受信箱</title></head>
+<body>
+<h1>受信箱 <span id="badge">0</span></h1>
+<p id="latest"></p>
+<input id="msg" aria-label="返事">
+<button id="send" type="button">送る</button>
+<button id="mark-read" type="button">既読にする</button>
+<ul id="log"></ul>
+<script>
+  // ページのスクリプトからは渡が見えないことを確かめる印
+  window.sawWatari = typeof globalThis.__watari !== 'undefined' || typeof globalThis.__watariLoaded !== 'undefined';
+  document.getElementById('send').addEventListener('click', (ev) => {
+    // 人のクリックと同じ扱いになっているか（isTrusted）も残す
+    const li = document.createElement('li');
+    li.textContent = document.getElementById('msg').value + (ev.isTrusted ? '' : '（isTrusted=false）');
+    document.getElementById('log').appendChild(li);
+    document.getElementById('msg').value = '';
+  });
+  document.getElementById('mark-read').addEventListener('click', () => {
+    document.getElementById('badge').textContent = '0';
+  });
+  window.arrive = (text) => {
+    document.getElementById('latest').textContent = text;
+    const b = document.getElementById('badge');
+    b.textContent = String(Number(b.textContent) + 1);
+  };
+</script>
+</body>
+</html>
