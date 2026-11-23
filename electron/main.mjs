@@ -14,6 +14,14 @@ const readJson = (p, d) => { try { return existsSync(p) ? JSON.parse(readFileSyn
 const port = () => readJson(join(home, 'config.json'), {}).port ?? 7960;
 const token = () => { try { return readFileSync(join(home, 'token'), 'utf8').trim(); } catch { return ''; } };
 
+// ログオンで起動する設定。名前を決めておく（Electron の既定の名前だと、ほかの Electron アプリとぶつかる）
+const loginItem = () => ({ name: 'watari', path: process.execPath, args: [fileURLToPath(import.meta.url), `--home=${home}`] });
+const setLoginItem = (on) => app.setLoginItemSettings({ ...loginItem(), openAtLogin: on });
+const loginItemOn = () => app.getLoginItemSettings(loginItem()).openAtLogin;
+// --login-item=on / off で、メニューを押さずに切り替えられる（入れるとき用）
+const loginArg = process.argv.find((a) => a.startsWith('--login-item='))?.slice('--login-item='.length);
+if (loginArg === 'on' || loginArg === 'off') setLoginItem(loginArg === 'on');
+
 if (!app.requestSingleInstanceLock()) app.quit();
 app.on('window-all-closed', (e) => e.preventDefault());
 
@@ -143,8 +151,8 @@ function buildMenu() {
   items.push({ label: '記録の場所を開く', click: () => shell.openPath(join(home, 'log')) });
   items.push({ label: '置き場を開く', click: () => shell.openPath(home) });
   items.push({
-    label: 'ログオンしたら起動する', type: 'checkbox', checked: app.getLoginItemSettings().openAtLogin,
-    click: (mi) => app.setLoginItemSettings({ openAtLogin: mi.checked, path: process.execPath, args: app.isPackaged ? [] : [root, `--home=${home}`] }),
+    label: 'ログオンしたら起動する', type: 'checkbox', checked: loginItemOn(),
+    click: (mi) => setLoginItem(mi.checked),
   });
   items.push({ label: '最新に更新', click: () => refresh() });
   items.push({ type: 'separator' });
