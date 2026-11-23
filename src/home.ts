@@ -13,6 +13,8 @@ export type Config = {
    */
   notify?: string[] | Record<string, string[]>;
   missingGraceMs?: number;
+  /** 窓の画面も通信もこれだけ動かなければ「古い（stale）」と出す。既定 15 分 */
+  staleMs?: number;
   headless?: boolean;
 };
 

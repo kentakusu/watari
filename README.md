@@ -40,7 +40,7 @@ claude mcp add watari -- node <このリポジトリ>/src/mcp.ts --home D:\watar
 # 紡の外なら: ... --session 所属/名前
 ```
 
-MCP の道具: `open_window`・`window_info`・`read`・`click`・`type_text`・`press_key`・`screenshot`・`set_label`・`list_extensions`・`install_extension`・`remove_extension`・`watari_status`。自分のセッションの窓しか操れません。
+MCP の道具: `open_window`・`window_info`・`read`・`click`・`type_text`・`press_key`・`screenshot`・`set_label`・`list_extensions`・`install_extension`・`remove_extension`・`search_captures`・`recent_log`・`watari_status`。自分のセッションの窓しか操れません。
 
 ### 置き場（`--home`・既定は環境変数 `WATARI_HOME`、無ければ `~/.watari`）
 
@@ -87,6 +87,28 @@ claude mcp add watari --scope user -- node /mnt/d/watari/app/src/mcp.ts --home /
 - 宣言していないサイトでは、その拡張は呼ばれません。
 - 見張っている要素がしばらく見つからないままなら、黙らずに「見つかりません」と通知します。
 - 人が窓の名札の「今触ってる」を押している間、`click`・`type`・`press` は待ちます（拡張も MCP も）。
+- 読む道具: `read`（最初の 1 つ）・`readAll`（全部）・`attrAll`（属性）・`waitFor`（出てくるまで待つ）。
+- `notifyTo`（`所属/名前`）を書くと、通知を窓のセッションとは別のセッションへ送ります。
+- `report({ gaps, note })` で「取りこぼしたかもしれない数」を報告できます。状態（`watari_status`）に出ます。
+
+### 通信の記録
+
+拡張が `capture` に URL の glob を書くと、その窓に届いた HTTP の応答と WebSocket のメッセージ（受けた・送ったの向きつき）を、本文ごと `captures/<所属>/<日付>.jsonl` に残し、`onCapture` に渡します。Claude からは MCP の `search_captures` で探せます。
+
+```ts
+capture: [{ name: 'messages', url: 'https://example.com/api/messages*' }, { name: 'live', url: 'wss://example.com/*', kinds: ['ws'] }],
+async onCapture(c, w) { /* c.body を読み解いて w.notify(...) */ },
+```
+
+- **要求の見出し（Cookie・Authorization など）は記録しません。** 残すのは URL・方法・状態・本文だけです。
+- 窓の通信を止めたり書き換えたりはしません（止めすぎると、画面が「切れた」とみなして取り直しを増やすことがあります）。
+- `capture` を書いた拡張が 1 つも無い所属では、通信を見ません。
+- 本文は 1 件 1MB で切ります（切ったら元の長さを `truncatedFrom` に残します）。本文が取れなかったら、黙らず `bodyError` に理由を残します。
+
+### 見えているかを確かめる
+
+- 窓ごとに「最後に画面か通信が動いた時刻」を持ち、`staleMs`（既定 15 分）を超えたら状態に `stale: true` と出します。`0 件` が「見たが無かった」なのか「見えていない（ログイン切れ・止まった画面）」なのかを区別するためです。
+- 失敗（拡張の失敗・通知の失敗・記録の書き込みの失敗）は記録に残り、MCP の `recent_log` で読めます。
 
 ## 試験
 

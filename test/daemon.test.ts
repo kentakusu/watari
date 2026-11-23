@@ -74,7 +74,7 @@ test('口: 合言葉なしでは断る・生死の確認だけは通す', async 
 
 test('MCP の道具がそろっている', async () => {
   const names = (await mcp.listTools()).tools.map((t) => t.name).sort();
-  for (const n of ['open_window', 'window_info', 'read', 'click', 'type_text', 'press_key', 'screenshot', 'set_label', 'list_extensions', 'install_extension', 'remove_extension', 'watari_status']) {
+  for (const n of ['open_window', 'window_info', 'read', 'click', 'type_text', 'press_key', 'screenshot', 'set_label', 'list_extensions', 'install_extension', 'remove_extension', 'search_captures', 'recent_log', 'watari_status']) {
     assert.ok(names.includes(n), `${n} がありません: ${names.join(',')}`);
   }
 });
@@ -145,6 +145,16 @@ test('状態に所属・窓・拡張が出る', async () => {
   assert.ok(a?.running);
   assert.deepEqual(a.windows.map((w: any) => w.session), ['test/mcp']);
   assert.deepEqual(a.extensions, []);
+  // 窓は動いたばかりなので古くない。取りこぼしの報告はまだ無い
+  assert.equal(a.windows[0].stale, false);
+  assert.equal(a.windows[0].gaps, 0);
+});
+
+test('記録の失敗だけを読める', async () => {
+  const r = JSON.parse(textOf(await call(mcp, 'recent_log', { types: ['window-opened'], limit: 5 })));
+  assert.ok(r.items.length > 0 && r.items.every((x: any) => x.type === 'window-opened'));
+  const none = JSON.parse(textOf(await call(mcp, 'search_captures', { contains: '無い' })));
+  assert.equal(none.matched, 0);
 });
 
 test('常駐を起こし直すと、開いていた窓が開き直される', async () => {

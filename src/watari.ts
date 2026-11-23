@@ -3,6 +3,7 @@ import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { launchChrome, type Browser } from './chrome.ts';
 import { BINDING, WORLD, pageScript, reconfigureExpression, siteMatches, type InjectConfig, type WatchDecl } from './inject.ts';
+import { NetworkTap, appendCapture, type Capture, type CaptureRule, type CaptureSpec } from './capture.ts';
 
 export type WatchSpec = { name: string; selector: string; read?: string };
 
@@ -32,6 +33,8 @@ export type WindowApi = {
   press(key: Key, modifiers?: number): Promise<void>;
   /** 拡張の notifyTo（無ければ窓のセッション）へ知らせる */
   notify(text: string): Promise<void>;
+  /** 取りこぼしたかもしれない数などを報告する（状態に出る。「0 件」を「見ていない」と区別するため） */
+  report(r: { gaps?: number; note?: string }): void;
 };
 
 export type Extension = {
@@ -41,6 +44,9 @@ export type Extension = {
   /** 通知の宛先（所属/名前）。省くと、その窓のセッション */
   notifyTo?: string;
   onChange(e: WatchEvent, w: WindowApi): Promise<void> | void;
+  /** 取る通信。宣言したものだけが記録され（captures/<所属>/<日付>.jsonl）、onCapture に渡る */
+  capture?: CaptureSpec[];
+  onCapture?(c: Capture, w: WindowApi): Promise<void> | void;
 };
 
 export type Notifier = (session: string, text: string) => Promise<void>;
@@ -141,8 +147,12 @@ export class SessionWindow {
   #touching = false;
   #touchWaiters: Array<() => void> = [];
   #queue: Promise<unknown> = Promise.resolve();
+  #tap?: NetworkTap;
   lastEventAt = '';
   url = '';
+  /** 拡張が「取りこぼしたかもしれない」と言った数の合計と、最後の言葉 */
+  gaps = 0;
+  lastReport = '';
 
   constructor(aff: Affiliation, session: string, label: string) {
     this.#aff = aff;
@@ -184,9 +194,33 @@ export class SessionWindow {
     await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }, sessionId);
     await cdp.send('Runtime.addBinding', { name: BINDING, executionContextName: WORLD }, sessionId);
     await this.#installScript();
+    this.#tap = new NetworkTap(cdp, sessionId);
+    this.#tap.onCapture = (rule, c) => this.#onCapture(rule, c);
+    await this.#syncCaptures();
     await cdp.send('Page.navigate', { url }, sessionId);
     this.url ||= url;
     this.#aff.log({ type: 'window-opened', session: this.session, url, extensions: this.#aff.extensions.map((e) => e.name) });
+  }
+
+  async #syncCaptures(): Promise<void> {
+    await this.#tap?.setRules(this.#aff.extensions.flatMap((e) => (e.capture ?? []).map((c) => ({ ...c, ext: e.name }))));
+  }
+
+  #onCapture(rule: CaptureRule, c: Omit<Capture, 'at' | 'session' | 'ext' | 'name'>): void {
+    this.lastEventAt = now();
+    const full: Capture = { at: this.lastEventAt, session: this.session, ext: rule.ext, name: rule.name, ...c };
+    try { appendCapture(this.#aff.home, this.#aff.name, full); }
+    catch (e: any) { this.#aff.log({ type: 'capture-write-failed', session: this.session, error: String(e?.message ?? e) }); }
+    const ext = this.#aff.extensions.find((e) => e.name === rule.ext);
+    // 宣言していないサイトの窓では、拡張を呼ばない（記録は残す）
+    if (!ext?.onCapture || !siteMatches(ext.sites, this.url)) return;
+    void this.#serial(async () => {
+      try { await ext.onCapture!(full, this.#api(ext)); }
+      catch (e: any) {
+        this.#aff.log({ type: 'extension-error', session: this.session, ext: ext.name, in: 'onCapture', error: String(e?.stack ?? e) });
+        await this.#api(ext).notify(`【渡 ${ext.name}】通信の処理で失敗しました: ${e?.message ?? e}`).catch(() => {});
+      }
+    });
   }
 
   async #installScript(): Promise<void> {
@@ -198,6 +232,7 @@ export class SessionWindow {
   /** 拡張の出し入れ・名札の変更を、開いている窓に効かせる。 */
   async applyExtensions(): Promise<void> {
     await this.#installScript();
+    await this.#syncCaptures();
     if (this.#ctx) await this.#eval(reconfigureExpression(this.#injectConfig())).catch(() => {});
     this.#aff.log({ type: 'extensions-applied', session: this.session, extensions: this.#aff.extensions.map((e) => e.name) });
   }
@@ -375,6 +410,12 @@ export class SessionWindow {
           log({ type: 'notify-failed', error: String(e?.message ?? e) });
           throw e;
         }
+      },
+      report: (r) => {
+        const gaps = Math.max(0, Math.floor(r.gaps ?? 0));
+        this.gaps += gaps;
+        if (r.note) this.lastReport = r.note;
+        log({ type: 'report', gaps, note: r.note });
       },
     };
   }
