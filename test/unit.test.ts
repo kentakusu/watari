@@ -30,12 +30,12 @@ test('通知は所属ごとのコマンドへ、無ければ "*" へ行き、本
   try {
     // 本文を、所属と名前を名前にしたファイルへ書くだけのコマンド
     const writer = (tag: string) => [process.execPath, '-e', `require('fs').writeFileSync(process.argv[1], require('fs').readFileSync(0, 'utf8'))`, join(dir, `${tag}-{affiliation}-{name}.txt`)];
-    const n = configuredNotifier({ reatex: writer('r'), '*': writer('other') });
-    await n('reatex/reatex-main', '行1\n「記号」$HOME');
-    await n('kenta/watari-windows', 'ほか');
-    assert.equal(readFileSync(join(dir, 'r-reatex-reatex-main.txt'), 'utf8'), '行1\n「記号」$HOME');
-    assert.equal(readFileSync(join(dir, 'other-kenta-watari-windows.txt'), 'utf8'), 'ほか');
-    assert.ok(!existsSync(join(dir, 'other-reatex-reatex-main.txt')), 'reatex の通知が "*" にも行っている');
+    const n = configuredNotifier({ 'team-a': writer('r'), '*': writer('other') });
+    await n('team-a/team-a-main', '行1\n「記号」$HOME');
+    await n('team-b/someone', 'ほか');
+    assert.equal(readFileSync(join(dir, 'r-team-a-team-a-main.txt'), 'utf8'), '行1\n「記号」$HOME');
+    assert.equal(readFileSync(join(dir, 'other-team-b-someone.txt'), 'utf8'), 'ほか');
+    assert.ok(!existsSync(join(dir, 'other-team-a-team-a-main.txt')), 'team-a の通知が "*" にも行っている');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -56,12 +56,12 @@ test('通信の記録は保持の日数より古い日のファイルだけを�
 });
 
 test('所属ごとの設定: 数ならどの所属にも、表ならその所属 → "*" の順、無ければ期限なし', () => {
-  assert.equal(perAffiliation(30, 'reatex'), 30);
-  assert.equal(perAffiliation({ reatex: 30 }, 'reatex'), 30);
-  assert.equal(perAffiliation({ reatex: 30 }, 'kenta'), undefined, 'reatex の日数が kenta にも効いている');
-  assert.equal(perAffiliation({ reatex: 30, '*': 7 }, 'kenta'), 7);
-  assert.equal(perAffiliation({ reatex: 0, '*': 7 }, 'reatex'), 0, '所属に 0 と書いたら "*" より優先する（期限なし）');
-  assert.equal(perAffiliation(undefined, 'reatex'), undefined);
+  assert.equal(perAffiliation(30, 'team-a'), 30);
+  assert.equal(perAffiliation({ 'team-a': 30 }, 'team-a'), 30);
+  assert.equal(perAffiliation({ 'team-a': 30 }, 'team-b'), undefined, 'team-a の日数が team-b にも効いている');
+  assert.equal(perAffiliation({ 'team-a': 30, '*': 7 }, 'team-b'), 7);
+  assert.equal(perAffiliation({ 'team-a': 0, '*': 7 }, 'team-a'), 0, '所属に 0 と書いたら "*" より優先する（期限なし）');
+  assert.equal(perAffiliation(undefined, 'team-a'), undefined);
 });
 
 test('MQTT: 1 つのフレームに入った複数のパケットを開き、PUBLISH の topic と中身（JSON）を取り出す', () => {

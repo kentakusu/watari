@@ -29,7 +29,7 @@ beforeEach(() => {
   cfg = {
     notifyTo: 'a/main', quietSeconds: 0.2, maxWaitSeconds: 2, hourlyLimit: 30,
     selfStreams: ['me-dm'], namedStreams: ['boss'],
-    rules: [{ name: 'toMe', toMe: true }, { name: 'urgent', keywords: ['至急'] }, { name: 'direct', streamKinds: ['direct'] }, { name: 'suzuki', authors: ['鈴木'] }],
+    rules: [{ name: 'toMe', toMe: true }, { name: 'urgent', keywords: ['至急'] }, { name: 'direct', streamKinds: ['direct'] }, { name: 'sato', authors: ['佐藤'] }],
   };
   E = new TriggerEngine({ db: L.db, config: () => cfg, send: async (to, line) => { if (failSend) throw new Error('届かない'); sent.push({ to, line }); }, log: () => {}, ownerRead: (s) => L.ownerReadSeq(s) });
 });
@@ -61,9 +61,9 @@ test('どの条件にも当たらない発言では起こさない', async () =>
 });
 
 test('キーワード・部屋の種類・書き手の名前（部分一致）で起こす', async () => {
-  put([item({ stream: 's1', text: '至急お願いします' }), item({ stream: 's2', streamKind: 'direct' }), item({ stream: 's3', authorName: '鈴木 健太' })]);
+  put([item({ stream: 's1', text: '至急お願いします' }), item({ stream: 's2', streamKind: 'direct' }), item({ stream: 's3', authorName: '佐藤 一郎' })]);
   await sleep(400);
-  assert.deepEqual(sent.map((s) => s.line.match(/rules=(\S+)/)![1]).sort(), ['direct', 'suzuki', 'urgent']);
+  assert.deepEqual(sent.map((s) => s.line.match(/rules=(\S+)/)![1]).sort(), ['direct', 'sato', 'urgent']);
 });
 
 test('同じ部屋の続けての発言は 1 つにまとめる（静かになってから）', async () => {
