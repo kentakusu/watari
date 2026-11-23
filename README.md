@@ -139,6 +139,10 @@ w.ledger.put([{
 w.ledger.setOwnerRead('room-123', 455);                  // 持ち主がどこまで読んだか
 ```
 
+- **書き手の見分けは設定で**します。拡張は書き手の id・名前・人か Bot か（`authorKind`）を素直に入れるだけにし、`config.json` の `identity`（所属ごと）で直します:
+  - `ownAuthors`（id）に当たる書き手は、持ち主の側（`mine: true`）
+  - 自分の 1:1（起こす条件の `selfStreams`）に出てきた Bot は、持ち主の側として覚える（台帳に残る。`learnOwnBotsFromSelfStreams: false` で切れる）
+  - `proxyAuthorNames`（名前の一部）に当たる Bot は、人と同じに扱う（ほかの人の代理の Bot のため。持ち主の側の Bot には当たらない）
 - 同じ発言（`stream` と `id` の組）は 1 回だけ残します。中身が変わったら（取り消し・編集）更新として返します。
 - 消したあとに同じ発言を取り直しても、新しいものとは扱いません。
 - `seq` があれば、部屋ごとに番号の抜けを数えて状態に出します。

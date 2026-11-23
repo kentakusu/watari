@@ -234,6 +234,33 @@ test('台帳: 拡張が入れた発言で起こし（本文なし）、MCP で�
   assert.ok(!(await call(mcp, 'remove_extension', { name: 'ledger-ext' })).isError);
 });
 
+test('台帳に入れるとき、設定の identity で書き手を見分ける（拡張は素直に入れるだけ）', async () => {
+  const cfgPath = join(home, 'config.json');
+  const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'));
+  writeFileSync(cfgPath, JSON.stringify({ ...cfg, identity: { test: { ownAuthors: ['u-own'], proxyAuthorNames: ['x アシスタント'] } } }));
+  const p = join(home, 'identity-ext.mjs');
+  writeFileSync(p, `export default {
+    name: 'identity-ext', sites: ['http://127.0.0.1:*/*'], watch: [{ name: '最新', selector: '#latest' }],
+    onChange(e, w) {
+      if (!e.value) return;
+      const at = new Date().toISOString();
+      w.ledger.put([
+        { stream: 'room-id', id: 'own-' + e.value, at, text: 'a', author: 'u-own', authorKind: 'human' },
+        { stream: 'room-id', id: 'proxy-' + e.value, at, text: 'b', author: 'b-proxy', authorKind: 'bot', authorName: '田中 x アシスタント' },
+        { stream: 'room-id', id: 'bot-' + e.value, at, text: 'c', author: 'b-plain', authorKind: 'bot', authorName: 'お知らせ' },
+      ]);
+    },
+  };`);
+  assert.ok(!(await call(mcp, 'install_extension', { path: p })).isError);
+  await call(mcp, 'open_window', { url: `${siteUrl}?arrive=${encodeURIComponent('見分け')}` });
+  await waitFor(async () => { const r = await call(mcp, 'ledger_list', { stream: 'room-id' }); return !r.isError && JSON.parse(textOf(r)).items.length === 3; }, 15000, '3 件が台帳に入る');
+  const items = JSON.parse(textOf(await call(mcp, 'ledger_list', { stream: 'room-id', order: 'asc' }))).items;
+  const by = Object.fromEntries(items.map((x: any) => [x.author, [!!x.mine, x.authorKind]]));
+  assert.deepEqual(by, { 'u-own': [true, 'human'], 'b-proxy': [false, 'human'], 'b-plain': [false, 'bot'] });
+  writeFileSync(cfgPath, JSON.stringify(cfg));
+  assert.ok(!(await call(mcp, 'remove_extension', { name: 'identity-ext' })).isError);
+});
+
 test('台帳の無い所属を読んでも、台帳のファイルを作らない', async () => {
   const r = await daemon.methods['ledger.search']({ affiliation: 'no-ledger', q: '何か' }).then(() => null, (e: Error) => e.message);
   assert.match(String(r), /まだ台帳がありません/);

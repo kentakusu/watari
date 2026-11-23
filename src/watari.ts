@@ -5,6 +5,7 @@ import { launchChrome, type Browser } from './chrome.ts';
 import { BINDING, WORLD, pageScript, reconfigureExpression, siteMatches, type InjectConfig, type WatchDecl } from './inject.ts';
 import { openState, type ExtensionState } from './state.ts';
 import { Ledger, type LedgerItemInput, type PutResult } from './ledger.ts';
+import { Identity, type IdentityConfig } from './identity.ts';
 import { TriggerEngine, type TriggerConfig } from './triggers.ts';
 import { decodeMqtt, MqttJoiner, type MqttPacket } from './mqtt.ts';
 import { Outbox, type OutboxConfig, type OutboxEntry } from './outbox.ts';
@@ -113,6 +114,8 @@ export type AffiliationOptions = {
   missingGraceMs?: number;
   /** この所属の「起こす条件」（呼ぶたびに読むので、設定を書き換えればすぐ効く） */
   triggerConfig?: () => TriggerConfig | undefined;
+  /** この所属の書き手の見分け（呼ぶたびに読む） */
+  identityConfig?: () => IdentityConfig | undefined;
   /** この所属の送る口の設定（呼ぶたびに読む） */
   outboxConfig?: () => OutboxConfig | undefined;
   /** 閉じるボタンを押されても閉じずに裏で動かす窓か（窓を開くときに聞く） */
@@ -153,6 +156,7 @@ export class Affiliation {
     this.notifier = opts.notifier;
     this.missingGraceMs = opts.missingGraceMs ?? 10000;
     this.#triggerConfig = opts.triggerConfig ?? (() => undefined);
+    this.#identityConfig = opts.identityConfig ?? (() => undefined);
     this.#outboxConfig = opts.outboxConfig ?? (() => undefined);
     this.closeToBackground = opts.closeToBackground ?? (() => false);
     this.#headless = !!opts.headless;
@@ -334,6 +338,16 @@ export class Affiliation {
     return box.get(entry.id)!;
   }
 
+  #identityConfig: () => IdentityConfig | undefined;
+  #identity?: Identity;
+  /** 書き手の見分けを通してから台帳に入れる（設定で authorKind・mine を直す） */
+  normalizeAuthors(items: LedgerItemInput[]): LedgerItemInput[] {
+    this.#identity ??= new Identity(this.ledger().db);
+    const r = this.#identity.apply(items, this.#identityConfig(), this.#triggerConfig()?.selfStreams ?? []);
+    if (r.learned.length) this.log({ type: 'own-authors-learned', authors: r.learned });
+    return r.items;
+  }
+
   triggers(): TriggerEngine {
     this.#triggers ??= new TriggerEngine({
       db: this.ledger().db,
@@ -351,6 +365,7 @@ export class Affiliation {
     this.#ledger?.close();
     this.#triggers = undefined;
     this.#ledger = undefined;
+    this.#identity = undefined;
     await this.browser?.close();
     this.log({ type: 'stopped' });
   }
@@ -807,7 +822,7 @@ export class SessionWindow {
       state: this.#aff.stateFor(ext),
       ledger: {
         put: (items, opt = {}) => {
-          const r = this.#aff.ledger().put(items);
+          const r = this.#aff.ledger().put(this.#aff.normalizeAuthors(items));
           this.#aff.triggers().consider(r.added, opt);
           // 送った本文が自分の発言として入ったかを確かめる
           for (const c of this.#aff.outbox().matchLedger([...r.added, ...r.updated])) log({ type: 'send-confirmed', id: c.id, stream: c.stream, by: c.confirmedBy });
