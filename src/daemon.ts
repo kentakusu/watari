@@ -4,6 +4,8 @@ import { createServer, type IncomingMessage } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { searchCaptures, pruneCaptures, listCaptureAffiliations } from './capture.ts';
+import { Ledger } from './ledger.ts';
+import type { TriggerConfig } from './triggers.ts';
 import { isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Affiliation, type Extension } from './watari.ts';
@@ -35,7 +37,10 @@ export async function loadExtension(path: string): Promise<Extension> {
   if (e.notifyTo !== undefined && (typeof e.notifyTo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(e.notifyTo))) throw bad('notifyTo は「所属/名前」');
   if (e.capture !== undefined) {
     if (!Array.isArray(e.capture)) throw bad('capture が配列ではない');
-    for (const c of e.capture) if (typeof c?.name !== 'string' || typeof c?.url !== 'string' || !c.url) throw bad('capture の各項に name と url が要る');
+    for (const c of e.capture) {
+      if (typeof c?.name !== 'string' || typeof c?.url !== 'string' || !c.url) throw bad('capture の各項に name と url が要る');
+      if (c.binary !== undefined && c.binary !== 'drop' && c.binary !== 'base64') throw bad(`capture の binary は 'drop' か 'base64'（${c.binary}）`);
+    }
   }
   if (e.onCapture !== undefined && typeof e.onCapture !== 'function') throw bad('onCapture が関数ではない');
   return e;
@@ -69,12 +74,38 @@ export async function startDaemon(opts: DaemonOptions) {
     let a = affiliations.get(name);
     if (a && a.running) return a;
     if (!start) throw new Error(`所属 ${name} の Chrome は動いていません`);
-    a = new Affiliation({ name, home, notifier, headless: opts.headless ?? cfg.headless, missingGraceMs: opts.missingGraceMs ?? cfg.missingGraceMs });
+    a = new Affiliation({
+      name, home, notifier, headless: opts.headless ?? cfg.headless, missingGraceMs: opts.missingGraceMs ?? cfg.missingGraceMs,
+      // 毎回読む（設定の triggers を書き換えれば、常駐を起こし直さなくても次の発言から効く）
+      triggerConfig: () => triggerConfigOf(name),
+    });
     a.onWindowsChanged = () => saveWindows();
     await a.start();
     await a.setExtensions(await extensionsFor(name));
     affiliations.set(name, a);
     return a;
+  }
+
+  function triggerConfigOf(name: string): TriggerConfig | undefined {
+    const t = readConfig(home).triggers;
+    return t?.[name] ?? t?.['*'];
+  }
+
+  function affName(v: unknown): string {
+    if (typeof v !== 'string' || !/^[^/\\\s.]+$/.test(v)) throw new Error('affiliation が要ります');
+    return v;
+  }
+
+  // Chrome が動いていない所属の台帳も読めるように、読むためだけに開いたものを持っておく
+  const standaloneLedgers = new Map<string, Ledger>();
+  function ledgerOf(name: string): Ledger {
+    const a = affiliations.get(name);
+    if (a?.running) return a.ledger();
+    // 読むだけのときに、台帳の無い所属にファイルを作らない
+    if (!existsSync(join(home, 'ledger', `${name}.db`))) throw new Error(`所属 ${name} には、まだ台帳がありません（拡張が発言を入れると作られます）`);
+    let l = standaloneLedgers.get(name);
+    if (!l) { l = new Ledger(home, name); standaloneLedgers.set(name, l); }
+    return l;
   }
 
   function win(session: string) {
@@ -117,6 +148,12 @@ export async function startDaemon(opts: DaemonOptions) {
       affiliations: [...affiliations.values()].map((a) => ({
         name: a.name, running: a.running, startedAt: a.startedAt,
         extensions: a.extensions.map((e) => e.name),
+        // 台帳を使っている所属だけ（使っていない所属にファイルを作らない）
+        ledger: existsSync(join(home, 'ledger', `${a.name}.db`)) ? {
+          aiUnread: a.ledger().countUnread(),
+          gaps: a.ledger().gaps(),
+          triggers: triggerConfigOf(a.name) ? a.triggers().stats() : '起こす条件が設定されていません',
+        } : undefined,
         windows: [...a.windows.values()].map((w) => ({
           session: w.session, label: w.label, url: w.url, touching: w.touching, lastEventAt: w.lastEventAt,
           // 画面も通信も長く動いていない＝見えていないかもしれない（ログイン切れ・止まった画面）。「0 件」と区別するため
@@ -148,6 +185,28 @@ export async function startDaemon(opts: DaemonOptions) {
     'window.focus': async (p) => { await win(p.session).focus(); return { ok: true }; },
     'window.label': async (p) => { await win(p.session).setLabel(String(p.label)); saveWindows(); return { ok: true }; },
     'window.close': async (p) => { await win(p.session).close(); return { ok: true }; },
+    'ledger.unread': async (p) => {
+      const name = affName(p.affiliation);
+      return { items: ledgerOf(name).unread({ forMeOnly: !!p.forMeOnly, selfStreams: triggerConfigOf(name)?.selfStreams ?? [], limit: p.limit }) };
+    },
+    'ledger.read': async (p) => {
+      const name = affName(p.affiliation);
+      if (typeof p.stream !== 'string' || typeof p.id !== 'string') throw new Error('stream と id が要ります');
+      const r = ledgerOf(name).read(p.stream, p.id, p.context ?? 5);
+      if (!r) throw new Error(`台帳にその発言はありません: ${p.stream} / ${p.id}`);
+      return r;
+    },
+    'ledger.search': async (p) => {
+      const name = affName(p.affiliation);
+      if (typeof p.q !== 'string' || !p.q.trim()) throw new Error('q（探す言葉）が要ります');
+      return { items: ledgerOf(name).search(p.q, { stream: p.stream, limit: p.limit }) };
+    },
+    'ledger.fires': async (p) => {
+      const name = affName(p.affiliation);
+      const a = affiliations.get(name);
+      if (!a?.running) return { items: [], note: 'この所属の Chrome は動いていません（起こす条件も動いていません）' };
+      return { items: a.triggers().recentFires(p.limit ?? 20), stats: a.triggers().stats() };
+    },
     'capture.search': async (p) => {
       if (typeof p.affiliation !== 'string' || !p.affiliation) throw new Error('affiliation が要ります');
       return searchCaptures(home, p.affiliation, { name: p.name, ext: p.ext, session: p.session, since: p.since, contains: p.contains, limit: p.limit });
@@ -234,6 +293,11 @@ export async function startDaemon(opts: DaemonOptions) {
       try {
         const days = perAffiliation(setting, a); // 所属ごと（書いていない所属は期限なし）
         const gone = pruneCaptures(home, a, days);
+        const ldays = perAffiliation(readConfig(home).ledgerRetentionDays, a);
+        if (ldays && existsSync(join(home, 'ledger', `${a}.db`))) {
+          const n = ledgerOf(a).prune(ldays);
+          if (n) affiliations.get(a)?.log({ type: 'ledger-pruned', days: ldays, items: n });
+        }
         if (gone.length) affiliations.get(a)?.log({ type: 'captures-pruned', days, files: gone });
       } catch (e: any) { process.stderr.write(`渡: 古い通信の記録を消せませんでした（${a}）: ${e?.message ?? e}\n`); }
     }
@@ -250,6 +314,8 @@ export async function startDaemon(opts: DaemonOptions) {
   async function stop() {
     clearInterval(heartbeat);
     for (const a of affiliations.values()) await a.stop().catch(() => {});
+    for (const l of standaloneLedgers.values()) l.close();
+    standaloneLedgers.clear();
     affiliations.clear();
     await new Promise<void>((r) => server.close(() => r()));
     // 名乗りを消す（記録とプロファイルは残す）

@@ -40,7 +40,7 @@ claude mcp add watari -- node <このリポジトリ>/src/mcp.ts --home D:\watar
 # 紡の外なら: ... --session 所属/名前
 ```
 
-MCP の道具: `open_window`・`window_info`・`read`・`click`・`type_text`・`press_key`・`screenshot`・`set_label`・`list_extensions`・`install_extension`・`remove_extension`・`search_captures`・`recent_log`・`watari_status`。自分のセッションの窓しか操れません。
+MCP の道具: `open_window`・`window_info`・`read`・`click`・`type_text`・`press_key`・`screenshot`・`set_label`・`list_extensions`・`install_extension`・`remove_extension`・`search_captures`・`recent_log`・`ledger_unread`・`ledger_read`・`ledger_search`・`ledger_fires`・`collect`・`dom_outline`・`watari_status`。自分のセッションの窓しか操れません。
 
 ### 置き場（`--home`・既定は環境変数 `WATARI_HOME`、無ければ `~/.watari`）
 
@@ -106,11 +106,67 @@ async onCapture(c, w) { /* c.body を読み解いて w.notify(...) */ },
 - 本文は 1 件 1MB で切ります（切ったら元の長さを `truncatedFrom` に残します）。本文が取れなかったら、黙らず `bodyError` に理由を残します。
 
 - 窓そのものの通信に加え、**共有ワーカー・サービスワーカーの通信**も同じ規則で取ります（記録の `source` が `page` / `shared_worker` / `service_worker`、ワーカーなら `workerUrl`）。ワーカーは起きる前に止めてもらい、記録を有効にしてから動かします（あとからつなぐと最初の接続を取り逃がすため）。ワーカーは窓をまたいで共有されるので、その拡張の `sites` に当たる窓の `onCapture` に渡します。
+- バイナリ（WebSocket のバイナリのフレーム・HTTP のバイナリの応答）は、既定では長さだけ（`[binary N base64]`）を残します。規則に `binary: 'base64'` と書くと、中身を base64 のまま `body` に残します（記録の `encoding` が `'base64'`）。1MB を超えるものは、途中で切ると読めなくなるので残しません。
+- WebSocket の上の MQTT は `w.decode.mqtt(c.body)` で開けます。1 つのフレームの中の複数のパケットを順に開き、PUBLISH は `topic` と中身（`payload`（base64）・読めれば `payloadText`・JSON なら `payloadJson`）を返します。版 5 は `{ version: 5 }`。途中で切れているもの（フレームをまたぐもの）は `truncated: true` で返します。
 - 残す日数は `config.json` の `captureRetentionDays`（今日を 1 日目と数える）。**書かなければ期限なし**です。数を書くと全部の所属に、`{ "reatex": 30, "*": 7 }` のように書くと所属ごとに効きます（書いていない所属は `"*"`、それも無ければ期限なし）。書き換えると、常駐を起こし直さなくても 1 時間以内に効きます。
 
 ### 拡張の状態
 
 `w.state.get(key)` / `w.state.set(key, value)` / `w.state.delete(key)` で、小さな状態（例: どの番号まで知らせたか）を残せます。所属と拡張ごとに `state/<所属>/<拡張>.json` に置かれ、常駐の再起動をまたいで残ります。1MB を超える書き込みは断ります（本文や記録の置き場にしないため）。
+
+### 発言の台帳と、起こす条件
+
+チャット・メール・通知のような「発言」を、拡張が読み解いて `w.ledger.put([...])` で渡すと、渡が所属ごとの台帳（`ledger/<所属>.db`・SQLite）に残します。
+
+```ts
+w.ledger.put([{
+  stream: 'room-123', id: 'msg-456', seq: 456,          // 部屋・発言の id・通し番号（あれば抜けを数える）
+  streamKind: 'group', streamName: '営業の部屋',          // direct / group / self / bot / other
+  author: 'u-1', authorKind: 'human', authorName: '田中',
+  at: '2026-11-23T08:00:00Z', text: '本文',
+  to: ['u-me'], toAll: false, toMe: true,                // 誰宛てか（「自分宛て」は拡張が判断して入れる）
+  replyTo: { id: 'msg-400', author: 'u-me' }, replyToMe: true,
+  mine: false, recalled: false, meta: { /* 拡張が残したいもの */ },
+}]);
+w.ledger.setOwnerRead('room-123', 455);                  // 持ち主がどこまで読んだか
+```
+
+- 同じ発言（`stream` と `id` の組）は 1 回だけ残します。中身が変わったら（取り消し・編集）更新として返します。
+- 消したあとに同じ発言を取り直しても、新しいものとは扱いません。
+- `seq` があれば、部屋ごとに番号の抜けを数えて状態に出します。
+- 全文検索は日本語の部分一致です（3 文字以上は trigram、2 文字以下も探せます）。
+- 最初の一括取り込みは `put(items, { initial: true })` にします（起こしません）。
+
+**起こす条件**は `config.json` の `triggers` に、所属ごとに書きます。当たった発言があれば、本文を含まない 1 行（`trigger id=… rules=… kind=… count=… stream=…`）を `notifyTo` へ知らせます。本文は MCP の `ledger_read` で引きます。
+
+```json
+{
+  "triggers": {
+    "所属": {
+      "notifyTo": "所属/統括のセッション名",
+      "maxAgeMinutes": 60, "quietSeconds": 20, "maxWaitSeconds": 120, "hourlyLimit": 30,
+      "selfStreams": ["持ち主が Claude に話しかける部屋"],
+      "namedStreams": ["持ち主が先に読んでいても起こす部屋"],
+      "rules": [
+        { "name": "toMe", "toMe": true },
+        { "name": "reply", "replyToMe": true },
+        { "name": "direct", "streamKinds": ["direct"] },
+        { "name": "urgent", "keywords": ["至急", "緊急"] }
+      ]
+    }
+  }
+}
+```
+
+- 起こさないもの: 有効にした時刻（`enabledAt`。書かなければ常駐が起きた時刻）より前・`maxAgeMinutes` より古い・最初の一括取り込み・取り消し・自分の発言（`selfStreams` は別）・持ち主が先に読んだ発言（`namedStreams` と `selfStreams` は別）・所属全体の `authorKinds`（例: `["human"]`）に入っていない書き手の種類（`selfStreams` と `namedStreams` にも効く。書き手の種類が分からない発言は通す）。
+- 条件には、ほかに `authorKinds`（書き手の種類）と `spokeRecentlyHours`（持ち主がその部屋でこの時間内に発言していれば当たる＝会話の続き）を書けます。
+- `selfStreams` は静けさを待たずに出します（`selfQuietSeconds`・既定 0）。
+- 1 つの条件の中は「全部に当たる」、条件どうしは「どれかに当たる」です。配列の中は「どれか 1 つ」です。書き手（`authors`）は id か名前の部分一致です。
+- 同じ部屋の続けての発言は、`quietSeconds` 静かになるまで（最長 `maxWaitSeconds`）待って 1 回にまとめます。
+- 1 時間に `hourlyLimit` を超えた分は「まとめ」1 件に畳みます（`selfStreams` は上限の外）。
+- 設定を書き換えると、常駐を起こし直さなくても次の発言から効きます。台帳を残す日数は `ledgerRetentionDays`（書き方は `captureRetentionDays` と同じ・既定は期限なし）。
+
+MCP: `ledger_unread`（AI がまだ読んでいない発言・`for_me_only` で宛てだけ）・`ledger_read`（前の流れと返信先と一緒に読み、読んだ印を付ける。流れに抜けがあれば `contextGap`）・`ledger_search`（全文）・`ledger_fires`（最近の知らせと、届かなかった数・AI がまだ読んでいない知らせの数と最古の時刻）。
 
 ### 見えているかを確かめる
 
@@ -126,6 +182,7 @@ async onCapture(c, w) { /* c.body を読み解いて w.notify(...) */ },
 | 通信の記録（本文つき） | `captures/<所属>/<日付>.jsonl` | 平文 | `captureRetentionDays`（既定は期限なし） |
 | 記録（見張りの値・操作・**通知の本文**・失敗） | `log/<所属>.jsonl` | 平文 | 期限なし（消す仕組みは無い） |
 | 拡張の状態 | `state/<所属>/<拡張>.json` | 平文 | 拡張が消すまで |
+| 発言の台帳（本文つき）と、出した知らせ | `ledger/<所属>.db` | SQLite（平文） | `ledgerRetentionDays`（既定は期限なし）。見たことのある発言の組（本文なし）は消さずに残す |
 | ログイン（Cookie など） | `profiles/<所属>/` | Chrome のプロファイル | 消すまで |
 | 合言葉 | `token` | 平文 | 消すまで |
 

@@ -1,6 +1,7 @@
 // 渡の置き場（WATARI_HOME）にあるもの: 設定・合言葉・常駐の名乗り・拡張の台帳・記録・プロファイル。
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import type { TriggerConfig } from './triggers.ts';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -21,6 +22,10 @@ export type Config = {
    * 所属ごとに変えるときは { "所属": 日数, "*": 日数 }（書いていない所属は期限なし）
    */
   captureRetentionDays?: number | Record<string, number>;
+  /** 発言の台帳を何日残すか（書き方は captureRetentionDays と同じ・既定は期限なし） */
+  ledgerRetentionDays?: number | Record<string, number>;
+  /** 所属ごとの「起こす条件」（{ "所属": {...}, "*": {...} }）。書いていない所属では起こさない */
+  triggers?: Record<string, TriggerConfig>;
   headless?: boolean;
 };
 

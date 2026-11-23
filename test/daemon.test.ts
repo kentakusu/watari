@@ -2,7 +2,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
-import { readFileSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, rmSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -41,7 +41,11 @@ const textOf = (r: any) => r.content.map((x: any) => x.text ?? '').join('');
 before(async () => {
   rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
   mkdirSync(home, { recursive: true });
-  writeFileSync(join(home, 'config.json'), JSON.stringify({ port }));
+  writeFileSync(join(home, 'config.json'), JSON.stringify({
+    port,
+    // 台帳の試験用: 宛ての発言で test/mcp を起こす（静けさを短く）
+    triggers: { test: { notifyTo: 'test/mcp', quietSeconds: 0.2, maxWaitSeconds: 2, rules: [{ name: 'toMe', toMe: true }] } },
+  }));
   const html = readFileSync(join(here, 'fixtures', 'inbox.html'), 'utf8');
   site = createServer((req, res) => {
     const u = new URL(req.url ?? '/', 'http://x');
@@ -74,7 +78,7 @@ test('口: 合言葉なしでは断る・生死の確認だけは通す', async 
 
 test('MCP の道具がそろっている', async () => {
   const names = (await mcp.listTools()).tools.map((t) => t.name).sort();
-  for (const n of ['open_window', 'window_info', 'read', 'collect', 'click', 'type_text', 'press_key', 'screenshot', 'dom_outline', 'set_label', 'list_extensions', 'install_extension', 'remove_extension', 'search_captures', 'recent_log', 'watari_status']) {
+  for (const n of ['open_window', 'window_info', 'read', 'collect', 'click', 'type_text', 'press_key', 'screenshot', 'dom_outline', 'set_label', 'list_extensions', 'install_extension', 'remove_extension', 'search_captures', 'recent_log', 'ledger_unread', 'ledger_read', 'ledger_search', 'ledger_fires', 'watari_status']) {
     assert.ok(names.includes(n), `${n} がありません: ${names.join(',')}`);
   }
 });
@@ -175,6 +179,54 @@ test('記録の失敗だけを読める', async () => {
   assert.ok(r.items.length > 0 && r.items.every((x: any) => x.type === 'window-opened'));
   const none = JSON.parse(textOf(await call(mcp, 'search_captures', { contains: '無い' })));
   assert.equal(none.matched, 0);
+});
+
+test('台帳: 拡張が入れた発言で起こし（本文なし）、MCP で未読を見て・流れと一緒に読み・探せる', async () => {
+  const p = join(home, 'ledger-ext.mjs');
+  writeFileSync(p, `export default {
+    name: 'ledger-ext', sites: ['http://127.0.0.1:*/*'], watch: [{ name: '最新', selector: '#latest' }],
+    onChange(e, w) {
+      if (!e.value) return;
+      w.ledger.put([{ stream: 'room-a', id: 'm-' + e.value, seq: 1, streamName: '試験の部屋', streamKind: 'group', author: 'u-tanaka', authorName: '田中',
+        at: new Date().toISOString(), text: e.value, toMe: e.value.includes('宛て') }]);
+    },
+  };`);
+  assert.ok(!(await call(mcp, 'install_extension', { path: p })).isError);
+  const before = notes.length;
+  await call(mcp, 'open_window', { url: `${siteUrl}?arrive=${encodeURIComponent('鈴木さん宛ての相談です')}` });
+  await waitFor(() => notes.slice(before).some((n) => n.text.startsWith('trigger id=')), 15000, '起こす知らせ');
+  const fire = notes.slice(before).find((n) => n.text.startsWith('trigger id='))!;
+  assert.equal(fire.session, 'test/mcp');
+  assert.match(fire.text, /^trigger id=\d+ rules=toMe kind=group count=1 stream=試験の部屋$/);
+  assert.ok(!fire.text.includes('相談'), '知らせに本文が入っている');
+
+  const unread = JSON.parse(textOf(await call(mcp, 'ledger_unread', { for_me_only: true })));
+  assert.deepEqual(unread.items.map((x: any) => x.text), ['鈴木さん宛ての相談です']);
+  const found = JSON.parse(textOf(await call(mcp, 'ledger_search', { q: '相談です' })));
+  assert.equal(found.items.length, 1);
+  let fires = JSON.parse(textOf(await call(mcp, 'ledger_fires')));
+  assert.equal(fires.stats.delivered, 1);
+  assert.equal(fires.stats.aiUnreadFires, 1);
+
+  const read = JSON.parse(textOf(await call(mcp, 'ledger_read', { stream: 'room-a', id: unread.items[0].id })));
+  assert.equal(read.item.text, '鈴木さん宛ての相談です');
+  assert.ok(read.item.aiReadAt);
+  assert.equal(JSON.parse(textOf(await call(mcp, 'ledger_unread', { for_me_only: true }))).items.length, 0);
+  fires = JSON.parse(textOf(await call(mcp, 'ledger_fires')));
+  assert.equal(fires.stats.aiUnreadFires, 0);
+  assert.ok(!(await call(mcp, 'remove_extension', { name: 'ledger-ext' })).isError);
+});
+
+test('台帳の無い所属を読んでも、台帳のファイルを作らない', async () => {
+  const r = await daemon.methods['ledger.search']({ affiliation: 'no-ledger', q: '何か' }).then(() => null, (e: Error) => e.message);
+  assert.match(String(r), /まだ台帳がありません/);
+  assert.ok(!existsSync(join(home, 'ledger', 'no-ledger.db')), '読んだだけで台帳のファイルができた');
+});
+
+test('台帳に無い発言を読もうとすると、黙らずに失敗を返す', async () => {
+  const r = await call(mcp, 'ledger_read', { stream: 'room-a', id: 'nai' });
+  assert.equal(r.isError, true);
+  assert.match(textOf(r), /台帳にその発言はありません/);
 });
 
 test('常駐を起こし直すと、開いていた窓が開き直される', async () => {
