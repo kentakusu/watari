@@ -106,6 +106,22 @@ tool('recent_log', 'このセッションの所属の記録（見張りの変化
   { types: z.array(z.string()).optional(), limit: z.number().int().min(1).max(500).optional() },
   async (a) => text(JSON.stringify(await daemon.call('log.recent', { affiliation: affiliation(), ...a }), null, 2)));
 
+tool('ledger_unread', '発言の台帳から、AI がまだ読んでいない発言を新しい順に返す（自分の発言と取り消しは除く）。for_me_only で、宛て・返信・全員宛て・自分の 1:1 だけに絞る。読んだ印は付けない（付けるのは ledger_read）。',
+  { for_me_only: z.boolean().optional(), limit: z.number().int().min(1).max(500).optional() },
+  async (a) => text(JSON.stringify(await daemon.call('ledger.unread', { affiliation: affiliation(), forMeOnly: a.for_me_only, limit: a.limit }), null, 2)));
+
+tool('ledger_read', '発言を 1 件、前の数件（流れ）と返信先と一緒に読み、AI が読んだ印を付ける。contextGap が true なら、前の流れに抜けがある（台帳に無い発言がある）。',
+  { stream: z.string(), id: z.string(), context: z.number().int().min(0).max(50).optional().describe('前の何件まで（既定 5）') },
+  async (a) => text(JSON.stringify(await daemon.call('ledger.read', { affiliation: affiliation(), stream: a.stream, id: a.id, context: a.context }), null, 2)));
+
+tool('ledger_search', '発言の台帳を全文で探す（本文・部屋の名前・書き手の名前の部分一致・新しい順）。読んだ印は付けない。',
+  { q: z.string(), stream: z.string().optional(), limit: z.number().int().min(1).max(500).optional() },
+  async (a) => text(JSON.stringify(await daemon.call('ledger.search', { affiliation: affiliation(), q: a.q, stream: a.stream, limit: a.limit }), null, 2)));
+
+tool('ledger_fires', '「起こす条件」が最近出した知らせ（id・部屋・当たった条件・発言の組）と、届けの状態（届かなかった数・AI がまだ読んでいない知らせの数と最古の時刻）。',
+  { limit: z.number().int().min(1).max(200).optional() },
+  async (a) => text(JSON.stringify(await daemon.call('ledger.fires', { affiliation: affiliation(), limit: a.limit }), null, 2)));
+
 tool('watari_status', '渡の常駐の状態（所属ごとの Chrome・窓・拡張・拡張を読めなかった記録）。窓の stale が true なら、画面も通信も長く動いていない（見えていないかもしれない）。gaps は拡張が「取りこぼしたかもしれない」と報告した数。',
   {},
   async () => text(JSON.stringify(await daemon.call('status'), null, 2)));

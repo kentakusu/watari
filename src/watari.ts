@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { launchChrome, type Browser } from './chrome.ts';
 import { BINDING, WORLD, pageScript, reconfigureExpression, siteMatches, type InjectConfig, type WatchDecl } from './inject.ts';
 import { openState, type ExtensionState } from './state.ts';
+import { Ledger, type LedgerItemInput, type PutResult } from './ledger.ts';
+import { TriggerEngine, type TriggerConfig } from './triggers.ts';
 import { NetworkTap, appendCapture, type Capture, type CaptureRule, type CaptureSpec } from './capture.ts';
 
 export type WatchSpec = { name: string; selector: string; read?: string };
@@ -40,6 +42,13 @@ export type WindowApi = {
   report(r: { gaps?: number; note?: string }): void;
   /** 拡張の小さな状態（所属と拡張ごと・常駐の再起動をまたいで残る・1MB まで） */
   state: ExtensionState;
+  /** 発言の台帳（所属ごと）。put で入れると、新しい発言だけが返り、起こす条件が判定される */
+  ledger: {
+    /** initial: 最初の一括取り込み（起こさない） */
+    put(items: LedgerItemInput[], opt?: { initial?: boolean }): PutResult;
+    /** 持ち主がその部屋でどこまで読んだか（それ以下の発言では起こさない） */
+    setOwnerRead(stream: string, seq: number, at?: string | number): void;
+  };
 };
 
 export type Extension = {
@@ -63,6 +72,8 @@ export type AffiliationOptions = {
   headless?: boolean;
   /** 見張りの要素が見つからないとき、これだけ待っても見つからなければ知らせる */
   missingGraceMs?: number;
+  /** この所属の「起こす条件」（呼ぶたびに読むので、設定を書き換えればすぐ効く） */
+  triggerConfig?: () => TriggerConfig | undefined;
 };
 
 export class NotFound extends Error {}
@@ -88,6 +99,7 @@ export class Affiliation {
     this.home = opts.home;
     this.notifier = opts.notifier;
     this.missingGraceMs = opts.missingGraceMs ?? 10000;
+    this.#triggerConfig = opts.triggerConfig ?? (() => undefined);
     this.#headless = !!opts.headless;
     mkdirSync(join(this.home, 'log'), { recursive: true });
   }
@@ -195,8 +207,31 @@ export class Affiliation {
     return w;
   }
 
+  #triggerConfig: () => TriggerConfig | undefined;
+  #ledger?: Ledger;
+  #triggers?: TriggerEngine;
+  /** 発言の台帳（初めて使うときに開く） */
+  ledger(): Ledger {
+    this.#ledger ??= new Ledger(this.home, this.name);
+    return this.#ledger;
+  }
+  triggers(): TriggerEngine {
+    this.#triggers ??= new TriggerEngine({
+      db: this.ledger().db,
+      config: this.#triggerConfig,
+      send: (to, line) => this.notifier(to, line),
+      log: (rec) => this.log(rec),
+      ownerRead: (s) => this.ledger().ownerReadSeq(s),
+    });
+    return this.#triggers;
+  }
+
   async stop(): Promise<void> {
     this.#stopping = true;
+    this.#triggers?.stop();
+    this.#ledger?.close();
+    this.#triggers = undefined;
+    this.#ledger = undefined;
     await this.browser?.close();
     this.log({ type: 'stopped' });
   }
@@ -530,6 +565,15 @@ export class SessionWindow {
         }
       },
       state: this.#aff.stateFor(ext),
+      ledger: {
+        put: (items, opt = {}) => {
+          const r = this.#aff.ledger().put(items);
+          this.#aff.triggers().consider(r.added, opt);
+          if (r.added.length || r.updated.length) log({ type: 'ledger-put', added: r.added.length, updated: r.updated.length, seenBefore: r.seenBefore, initial: !!opt.initial });
+          return r;
+        },
+        setOwnerRead: (stream, seq, at) => this.#aff.ledger().setOwnerRead(stream, seq, at),
+      },
       report: (r) => {
         const gaps = Math.max(0, Math.floor(r.gaps ?? 0));
         this.gaps += gaps;
