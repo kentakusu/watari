@@ -3,6 +3,7 @@ import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { launchChrome, type Browser } from './chrome.ts';
 import { BINDING, WORLD, pageScript, reconfigureExpression, siteMatches, type InjectConfig, type WatchDecl } from './inject.ts';
+import { openState, type ExtensionState } from './state.ts';
 import { NetworkTap, appendCapture, type Capture, type CaptureRule, type CaptureSpec } from './capture.ts';
 
 export type WatchSpec = { name: string; selector: string; read?: string };
@@ -37,6 +38,8 @@ export type WindowApi = {
   notify(text: string): Promise<void>;
   /** 取りこぼしたかもしれない数などを報告する（状態に出る。「0 件」を「見ていない」と区別するため） */
   report(r: { gaps?: number; note?: string }): void;
+  /** 拡張の小さな状態（所属と拡張ごと・常駐の再起動をまたいで残る・1MB まで） */
+  state: ExtensionState;
 };
 
 export type Extension = {
@@ -90,6 +93,14 @@ export class Affiliation {
   }
 
   get extensions(): readonly Extension[] { return this.#extensions; }
+
+  #states = new Map<string, ExtensionState>();
+  /** 拡張の状態。所属の中で拡張ごとに 1 つ（窓が違っても同じもの） */
+  stateFor(ext: string): ExtensionState {
+    let s = this.#states.get(ext);
+    if (!s) { s = openState(this.home, this.name, ext); this.#states.set(ext, s); }
+    return s;
+  }
   get running(): boolean { return !!this.browser && !this.browser.cdp.closed; }
 
   log(rec: object): void {
@@ -113,12 +124,65 @@ export class Affiliation {
       for (const [s, w] of this.windows) if (w.targetId === p.targetId) { this.windows.delete(s); this.log({ type: 'window-closed', session: s }); this.onWindowsChanged?.(); }
     });
     await this.browser.cdp.send('Target.setDiscoverTargets', { discover: true });
+    await this.#watchWorkers();
   }
 
   /** 拡張を差し替える。開いている窓の見張りもその場で変わる（ページは読み直さない）。 */
   async setExtensions(exts: Extension[]): Promise<void> {
     this.#extensions = [...exts];
     for (const w of this.windows.values()) await w.applyExtensions();
+    for (const t of this.#workers.values()) await t.tap.setRules(this.captureRules()).catch(() => {});
+  }
+
+  captureRules(): Array<CaptureSpec & { ext: string }> {
+    return this.#extensions.flatMap((e) => (e.capture ?? []).map((c) => ({ ...c, ext: e.name })));
+  }
+
+  // ---- 共有ワーカー・サービスワーカーの通信 ----
+  // ワーカーは窓とは別の target なので、Chrome 全体で自動でつなぐ。
+  // 起動の前で止めてもらい（waitForDebuggerOnStart）、通信の記録を有効にしてから動かす。
+  // そうしないと、開いてすぐの WebSocket の接続を取り逃がす。
+  #workers = new Map<string, { tap: NetworkTap; type: string; url: string }>();
+
+  async #watchWorkers(): Promise<void> {
+    const cdp = this.browser!.cdp;
+    cdp.on('Target.attachedToTarget', (p, sid) => {
+      if (sid) return; // 窓の中から来たものではなく、Chrome 全体の自動接続だけを扱う
+      const type = p.targetInfo.type as string;
+      if (type !== 'shared_worker' && type !== 'service_worker') return;
+      void this.#onWorker(p.sessionId, type, p.targetInfo.url);
+    });
+    cdp.on('Target.detachedFromTarget', (p, sid) => { if (!sid) this.#workers.delete(p.sessionId); });
+    await cdp.send('Target.setAutoAttach', {
+      autoAttach: true, waitForDebuggerOnStart: true, flatten: true,
+      filter: [{ type: 'shared_worker', exclude: false }, { type: 'service_worker', exclude: false }, { exclude: true }],
+    });
+  }
+
+  async #onWorker(sessionId: string, type: string, url: string): Promise<void> {
+    const cdp = this.browser!.cdp;
+    try {
+      const tap = new NetworkTap(cdp, sessionId);
+      tap.onCapture = (rule, c) => this.#onWorkerCapture(type, url, rule, c);
+      this.#workers.set(sessionId, { tap, type, url });
+      await tap.setRules(this.captureRules());
+      this.log({ type: 'worker-attached', worker: type, url });
+    } catch (e: any) {
+      this.log({ type: 'worker-attach-failed', worker: type, url, error: String(e?.message ?? e) });
+    } finally {
+      // 何があっても動かす（止めたままにするとサイトが動かなくなる）
+      await cdp.send('Runtime.runIfWaitingForDebugger', {}, sessionId).catch(() => {});
+    }
+  }
+
+  #onWorkerCapture(type: string, workerUrl: string, rule: CaptureRule, c: Omit<Capture, 'at' | 'session' | 'ext' | 'name'>): void {
+    const ext = this.#extensions.find((e) => e.name === rule.ext);
+    // ワーカーは窓をまたいで共有される。その拡張の sites に当たる窓に渡す（無ければ記録だけ）
+    const win = [...this.windows.values()].find((w) => ext && siteMatches(ext.sites, w.url));
+    const full: Capture = { at: now(), session: win?.session ?? `${this.name}/(ワーカー)`, ext: rule.ext, name: rule.name, source: type as Capture['source'], workerUrl, ...c };
+    try { appendCapture(this.home, this.name, full); }
+    catch (e: any) { this.log({ type: 'capture-write-failed', worker: type, error: String(e?.message ?? e) }); }
+    win?.dispatchCapture(full);
   }
 
   async openWindow(session: string, url: string, label = session): Promise<SessionWindow> {
@@ -205,15 +269,21 @@ export class SessionWindow {
   }
 
   async #syncCaptures(): Promise<void> {
-    await this.#tap?.setRules(this.#aff.extensions.flatMap((e) => (e.capture ?? []).map((c) => ({ ...c, ext: e.name }))));
+    await this.#tap?.setRules(this.#aff.captureRules());
   }
 
   #onCapture(rule: CaptureRule, c: Omit<Capture, 'at' | 'session' | 'ext' | 'name'>): void {
     this.lastEventAt = now();
-    const full: Capture = { at: this.lastEventAt, session: this.session, ext: rule.ext, name: rule.name, ...c };
+    const full: Capture = { at: this.lastEventAt, session: this.session, ext: rule.ext, name: rule.name, source: 'page', ...c };
     try { appendCapture(this.#aff.home, this.#aff.name, full); }
     catch (e: any) { this.#aff.log({ type: 'capture-write-failed', session: this.session, error: String(e?.message ?? e) }); }
-    const ext = this.#aff.extensions.find((e) => e.name === rule.ext);
+    this.dispatchCapture(full);
+  }
+
+  /** 記録済みの通信を、この窓の拡張の onCapture に渡す（ワーカーの通信もここを通る） */
+  dispatchCapture(full: Capture): void {
+    this.lastEventAt = now();
+    const ext = this.#aff.extensions.find((e) => e.name === full.ext);
     // 宣言していないサイトの窓では、拡張を呼ばない（記録は残す）
     if (!ext?.onCapture || !siteMatches(ext.sites, this.url)) return;
     void this.#serial(async () => {
@@ -459,6 +529,7 @@ export class SessionWindow {
           throw e;
         }
       },
+      state: this.#aff.stateFor(ext),
       report: (r) => {
         const gaps = Math.max(0, Math.floor(r.gaps ?? 0));
         this.gaps += gaps;

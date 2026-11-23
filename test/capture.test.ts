@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import type { Duplex } from 'node:stream';
 import { Affiliation, type Extension, type SessionWindow } from '../src/watari.ts';
 import { searchCaptures, type Capture } from '../src/capture.ts';
+import { openState } from '../src/state.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const home = process.env.WATARI_TEST_HOME ? join(process.env.WATARI_TEST_HOME, 'capture') : join(here, '..', '.test-home', 'capture');
@@ -39,6 +40,7 @@ function wsRead(buf: Buffer): string {
 
 const page = `<!doctype html><meta charset="utf-8"><title>通信の試験</title><body><p id="s">0</p><script>
 document.cookie = 'sess=cookie-secret-value';
+window.startWorker = () => { new SharedWorker('/worker.js'); };
 window.go = async () => {
   const r = await fetch('/api/msgs?n=1', { headers: { Authorization: 'Bearer header-secret-token' } });
   await r.text();
@@ -58,6 +60,7 @@ const ext: Extension = {
   onCapture(c, w) {
     seen.push(c);
     if (c.name === 'msgs') w.report({ gaps: 2, note: '番号が 2 つ飛んだ（試し）' });
+    w.state.set('seen', (w.state.get<number>('seen') ?? 0) + 1);
   },
 };
 
@@ -73,12 +76,17 @@ before(async () => {
       return res.end(JSON.stringify({ messages: [{ id: 7, text: '本文のテキスト' }] }));
     }
     res.setHeader('content-type', 'text/html; charset=utf-8');
+    if (req.url === '/worker.js') {
+      // 共有ワーカー: 起きてすぐ WebSocket をつなぎ、つながった瞬間に送る（最初の接続を取れるかを見る）
+      res.setHeader('content-type', 'text/javascript; charset=utf-8');
+      return res.end(`const ws = new WebSocket('ws://' + location.host + '/ws'); ws.onopen = () => ws.send('ワーカーから'); onconnect = () => {};`);
+    }
     res.end(req.url === '/other' ? 'ほか' : page);
   });
   server.on('upgrade', (req, sock) => {
     const accept = createHash('sha1').update(String(req.headers['sec-websocket-key']) + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
     sock.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
-    sock.once('data', (d: Buffer) => { if (wsRead(d) === '窓から') wsText(sock, 'サーバーから'); });
+    sock.once('data', (d: Buffer) => { const m = wsRead(d); wsText(sock, m === '窓から' ? 'サーバーから' : `返事:${m}`); });
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
   base = `http://127.0.0.1:${(server.address() as any).port}/`;
@@ -134,6 +142,23 @@ test('記録を探せる（名前・含む文字）', () => {
 test('拡張の「取りこぼしたかもしれない数」が窓に積まれる', () => {
   assert.equal(win.gaps, 2);
   assert.match(win.lastReport, /番号が 2 つ飛んだ/);
+});
+
+test('共有ワーカーの WebSocket も、起きた直後の最初の送信から取る', async () => {
+  await eval_('startWorker()');
+  await waitFor(() => seen.filter((c) => c.source === 'shared_worker').length >= 2, 15000, '共有ワーカーの記録');
+  const w = seen.filter((c) => c.source === 'shared_worker');
+  assert.deepEqual(w.map((c) => [c.dir, c.body]).sort(), [['in', '返事:ワーカーから'], ['out', 'ワーカーから']]);
+  assert.ok(w.every((c) => c.workerUrl?.endsWith('/worker.js') && c.session === 'cap/test'));
+  // 窓そのものの通信の記録には source: page が付く
+  assert.ok(seen.filter((c) => c.name === 'msgs').every((c) => c.source === 'page'));
+});
+
+test('拡張の状態は所属と拡張ごとのファイルに残り、読み直せる', () => {
+  const fresh = openState(home, 'cap', 'tap'); // 常駐を起こし直したのと同じ（ファイルから読み直す）
+  assert.ok((fresh.get<number>('seen') ?? 0) >= 4, JSON.stringify(fresh.all()));
+  assert.throws(() => fresh.set('big', 'x'.repeat(1_100_000)), /大きすぎます/);
+  assert.equal(fresh.get('big'), undefined, '断った書き込みが残っている');
 });
 
 test('拡張を外すと、もう取らない', async () => {

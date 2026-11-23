@@ -3,12 +3,12 @@
 import { createServer, type IncomingMessage } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
-import { searchCaptures } from './capture.ts';
+import { searchCaptures, pruneCaptures, listCaptureAffiliations } from './capture.ts';
 import { isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Affiliation, type Extension } from './watari.ts';
 import { configuredNotifier } from './notify.ts';
-import { ensureToken, readConfig, readDaemonInfo, readExtensions, readWindows, writeDaemonInfo, writeExtensions, writeWindows, type ExtensionRecord, type WindowRecord } from './home.ts';
+import { ensureToken, restrictHome, perAffiliation, readConfig, readDaemonInfo, readExtensions, readWindows, writeDaemonInfo, writeExtensions, writeWindows, type ExtensionRecord, type WindowRecord } from './home.ts';
 
 export type DaemonOptions = { home: string; port?: number; headless?: boolean; missingGraceMs?: number; notifyOverride?: (session: string, text: string) => Promise<void> };
 
@@ -46,6 +46,9 @@ export async function startDaemon(opts: DaemonOptions) {
   const cfg = readConfig(home);
   const staleMs = cfg.staleMs ?? 15 * 60 * 1000;
   const port = opts.port ?? cfg.port;
+  // 記録には他人の発言の本文が入るので、置き場をこのユーザーだけに絞ってから合言葉を作る
+  const homeAccess = restrictHome(home);
+  if (!homeAccess.ok) process.stderr.write(`渡: 置き場の権限を絞れませんでした: ${homeAccess.detail}\n`);
   const token = Buffer.from(ensureToken(home));
   const startedAt = now();
   const affiliations = new Map<string, Affiliation>();
@@ -109,7 +112,7 @@ export async function startDaemon(opts: DaemonOptions) {
 
   const methods: Record<string, (p: any) => Promise<any>> = {
     status: async () => ({
-      pid: process.pid, startedAt, port,
+      pid: process.pid, startedAt, port, homeAccess,
       loadErrors, restoreErrors,
       affiliations: [...affiliations.values()].map((a) => ({
         name: a.name, running: a.running, startedAt: a.startedAt,
@@ -223,9 +226,22 @@ export async function startDaemon(opts: DaemonOptions) {
     if (alive) throw new Error(`渡はもう動いています（pid ${other.pid}・口 ${other.port}）`);
   }
   await new Promise<void>((resolveListen, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => resolveListen()); });
+  let lastPrune = 0;
+  const prune = () => {
+    lastPrune = Date.now();
+    const setting = readConfig(home).captureRetentionDays; // 設定を書き換えたら、常駐を起こし直さなくても次から効く
+    for (const a of new Set([...affiliations.keys(), ...listCaptureAffiliations(home)])) {
+      try {
+        const days = perAffiliation(setting, a); // 所属ごと（書いていない所属は期限なし）
+        const gone = pruneCaptures(home, a, days);
+        if (gone.length) affiliations.get(a)?.log({ type: 'captures-pruned', days, files: gone });
+      } catch (e: any) { process.stderr.write(`渡: 古い通信の記録を消せませんでした（${a}）: ${e?.message ?? e}\n`); }
+    }
+  };
   const beat = () => {
     writeDaemonInfo(home, { pid: process.pid, port, startedAt, heartbeatAt: now() });
     saveWindows(); // URL は窓の中で変わるので、ときどき書き残す
+    if (Date.now() - lastPrune > 3600_000) prune();
   };
   await restoreWindows();
   beat();

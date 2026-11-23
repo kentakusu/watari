@@ -1,7 +1,7 @@
 // 通信の記録。窓に届いた HTTP の応答と WebSocket のメッセージのうち、拡張が宣言したものだけを取る。
 // ★要求の見出し（Cookie・Authorization など）は取らない。取るのは URL・方法・状態・本文だけ。
 // ★窓の通信を止めたり書き換えたりはしない（止めすぎると、画面が「切れた」とみなして取り直しを増やすことがある）。
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Cdp } from './cdp.ts';
 import { globSource } from './inject.ts';
@@ -23,6 +23,10 @@ export type Capture = {
   ext: string;
   name: string;
   kind: 'http' | 'ws';
+  /** どこから出た通信か（窓そのもの・共有ワーカー・サービスワーカー） */
+  source?: 'page' | 'shared_worker' | 'service_worker';
+  /** source がワーカーのとき、そのワーカーの URL */
+  workerUrl?: string;
   url: string;
   method?: string;
   status?: number;
@@ -50,6 +54,28 @@ export function appendCapture(home: string, affiliation: string, c: Capture): vo
   const dir = captureDir(home, affiliation);
   mkdirSync(dir, { recursive: true });
   appendFileSync(join(dir, `${day(c.at)}.jsonl`), JSON.stringify(c) + '\n');
+}
+
+/**
+ * days 日より古い日のファイルを消す（今日を 1 日目と数える）。days が無い・0 以下なら何もしない（期限なし）。
+ * 消したファイルの名前を返す。
+ */
+export function pruneCaptures(home: string, affiliation: string, days: number | undefined, now = new Date()): string[] {
+  if (!days || days <= 0) return [];
+  const dir = captureDir(home, affiliation);
+  if (!existsSync(dir)) return [];
+  const keepFrom = new Date(now.getTime() - (days - 1) * 86400000).toISOString().slice(0, 10);
+  const gone: string[] = [];
+  for (const f of readdirSync(dir)) {
+    if (/^\d{4}-\d{2}-\d{2}\.jsonl$/.test(f) && f.slice(0, 10) < keepFrom) { rmSync(join(dir, f), { force: true }); gone.push(f); }
+  }
+  return gone;
+}
+
+/** 通信の記録を持っている所属（常駐で動いていない所属の古い記録も消すため） */
+export function listCaptureAffiliations(home: string): string[] {
+  const dir = join(home, 'captures');
+  return existsSync(dir) ? readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name) : [];
 }
 
 export type CaptureQuery = { name?: string; ext?: string; session?: string; since?: string; contains?: string; limit?: number };
