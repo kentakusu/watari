@@ -87,7 +87,7 @@ claude mcp add watari --scope user -- node /mnt/d/watari/app/src/mcp.ts --home /
 
 [`examples/badge-watch/index.ts`](examples/badge-watch/index.ts) が例です。拡張は `name`・`sites`（触れてよいサイト）・`watch`（見張るセレクタ）・`onChange`（値が変わったときの動き）を持ちます。`onChange` には窓を操る道具（`read`・`click`・`type`・`press`・`notify`）が渡ります。
 
-- 入れるのは MCP の `install_extension`（絶対パス）。同じ所属の開いている窓すべてに、ページを読み直さずに効きます。形が違う拡張は入れずに断ります。
+- 入れるのは MCP の `install_extension`（絶対パス）。同じ所属の開いている窓すべてに、ページを読み直さずに効きます。形が違う拡張は入れずに断ります。入れ直すと、拡張が import している自分のファイル（`./parse.ts` など。`node_modules` の外）も読み直します。常駐の起こし直しは要りません。
 - 見張りはページのスクリプトから見えない別世界で動きます。
 - 宣言していないサイトでは、その拡張は呼ばれません。
 - 見張っている要素がしばらく見つからないままなら、黙らずに「見つかりません」と通知します。

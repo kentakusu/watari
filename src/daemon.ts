@@ -8,6 +8,7 @@ import { Ledger } from './ledger.ts';
 import type { TriggerConfig } from './triggers.ts';
 import { isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import module from 'node:module';
 import { Affiliation, type Extension } from './watari.ts';
 import { configuredNotifier } from './notify.ts';
 import { ensureToken, restrictHome, perAffiliation, keepOpenList, readConfig, readDaemonInfo, readDisplay, readExtensions, readWindows, writeDaemonInfo, writeDisplay, writeExtensions, writeWindows, type Display, type ExtensionRecord, type WindowRecord } from './home.ts';
@@ -21,11 +22,36 @@ function splitSession(session: unknown): { affiliation: string; session: string 
   return { affiliation: session.split('/')[0], session };
 }
 
+const RELOAD_PARAM = 'watari-reload';
+let reloadSeq = 0;
+let reloadHookInstalled = false;
+/**
+ * 拡張の入り口だけ URL を変えても、そこから import される './parse.ts' などは URL が同じなので、Node の控えに残った前の版が使われる。
+ * 入り口に付けた印を、拡張が import する file: のモジュール（node_modules の外）へ引き継いで、拡張ごと読み直させる。
+ */
+function installReloadHook() {
+  if (reloadHookInstalled) return;
+  reloadHookInstalled = true;
+  module.registerHooks({
+    resolve(specifier, context, next) {
+      const r = next(specifier, context);
+      const parent = context.parentURL;
+      if (!parent || !parent.startsWith('file:') || !r.url.startsWith('file:') || r.url.includes('/node_modules/')) return r;
+      const v = new URL(parent).searchParams.get(RELOAD_PARAM);
+      if (!v) return r;
+      const u = new URL(r.url);
+      u.searchParams.set(RELOAD_PARAM, v);
+      return { ...r, url: u.href };
+    },
+  });
+}
+
 export async function loadExtension(path: string): Promise<Extension> {
   if (!isAbsolute(path)) throw new Error(`拡張は絶対パスで渡してください: ${path}`);
   if (!existsSync(path)) throw new Error(`拡張のファイルがありません: ${path}`);
-  // 入れ直したときに新しい中身を読むよう、毎回別の URL にする
-  const mod = await import(pathToFileURL(path).href + `?v=${Date.now()}`);
+  // 入れ直したときに新しい中身を読むよう、毎回別の URL にする（拡張が import する自分のファイルにも同じ印を引き継ぐ）
+  installReloadHook();
+  const mod = await import(pathToFileURL(path).href + `?${RELOAD_PARAM}=${Date.now()}-${++reloadSeq}`);
   const e = mod.default as Extension;
   const bad = (why: string) => new Error(`拡張の形が違います（${why}）: ${path}`);
   if (!e || typeof e !== 'object') throw bad('default export がありません');
