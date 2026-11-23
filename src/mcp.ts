@@ -62,6 +62,15 @@ tool('screenshot', '窓の見えている範囲を画像で返す。',
   {},
   async () => ({ content: [{ type: 'image' as const, data: (await daemon.call('window.screenshot', { session: mySession() })).png, mimeType: 'image/png' }] }));
 
+tool('dom_outline', '窓の画面の作り（タグ・id・class・data- 属性・短く切ったテキスト）を木で返す。拡張のセレクタを探すため。読むだけ。中身のテキストを読むときは read を使う。',
+  {
+    selector: z.string().optional().describe('根にする要素（既定 body）'),
+    depth: z.number().int().min(1).max(30).optional(),
+    max_nodes: z.number().int().min(1).max(3000).optional(),
+    text_chars: z.number().int().min(0).max(200).optional().describe('テキストを何文字で切るか（既定 12）'),
+  },
+  async (a) => text(JSON.stringify(await daemon.call('window.outline', { session: mySession(), selector: a.selector, depth: a.depth, maxNodes: a.max_nodes, textChars: a.text_chars }))));
+
 tool('set_label', '窓の名札の名前を変える。',
   { label: z.string().min(1).max(60) },
   async (a) => { await daemon.call('window.label', { session: mySession(), label: a.label }); return text('変えました'); });

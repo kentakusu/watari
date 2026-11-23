@@ -74,7 +74,7 @@ test('口: 合言葉なしでは断る・生死の確認だけは通す', async 
 
 test('MCP の道具がそろっている', async () => {
   const names = (await mcp.listTools()).tools.map((t) => t.name).sort();
-  for (const n of ['open_window', 'window_info', 'read', 'click', 'type_text', 'press_key', 'screenshot', 'set_label', 'list_extensions', 'install_extension', 'remove_extension', 'search_captures', 'recent_log', 'watari_status']) {
+  for (const n of ['open_window', 'window_info', 'read', 'click', 'type_text', 'press_key', 'screenshot', 'dom_outline', 'set_label', 'list_extensions', 'install_extension', 'remove_extension', 'search_captures', 'recent_log', 'watari_status']) {
     assert.ok(names.includes(n), `${n} がありません: ${names.join(',')}`);
   }
 });
@@ -92,6 +92,14 @@ test('窓を開いて読み・入れ・押し・画像を撮る', async () => {
   const shot = await call(mcp, 'screenshot');
   assert.equal(shot.content[0].type, 'image');
   assert.ok(Buffer.from(shot.content[0].data, 'base64').subarray(1, 4).toString() === 'PNG');
+});
+
+test('画面の作りを木で読める（テキストは短く切る）', async () => {
+  const o = JSON.parse(textOf(await call(mcp, 'dom_outline', { selector: 'h1', text_chars: 2 })));
+  assert.equal(o.nodes.tag, 'h1');
+  assert.equal(o.nodes.text, '受信…(3)');
+  assert.deepEqual(o.nodes.children.map((c: any) => c.id), ['badge']);
+  assert.equal(JSON.parse(textOf(await call(mcp, 'dom_outline', { selector: '#nai' }))), null);
 });
 
 test('無い要素を押すと失敗として返る（黙って成功しない）', async () => {

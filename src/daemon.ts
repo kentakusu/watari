@@ -136,6 +136,7 @@ export async function startDaemon(opts: DaemonOptions) {
     'window.type': async (p) => { await win(p.session).act.type(p.selector, p.text); return { ok: true }; },
     'window.press': async (p) => { await win(p.session).act.press(p.key, p.modifiers ?? 0); return { ok: true }; },
     'window.screenshot': async (p) => ({ png: await win(p.session).act.screenshot() }),
+    'window.outline': async (p) => win(p.session).act.outline(p.selector ?? 'body', p.depth ?? 6, p.maxNodes ?? 400, p.textChars ?? 12),
     'window.touch': async (p) => { win(p.session).setTouching(!!p.on); return { ok: true }; },
     'window.focus': async (p) => { await win(p.session).focus(); return { ok: true }; },
     'window.label': async (p) => { await win(p.session).setLabel(String(p.label)); saveWindows(); return { ok: true }; },

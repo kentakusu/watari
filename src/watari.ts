@@ -378,6 +378,28 @@ export class SessionWindow {
       return { ...r, touching: this.#touching, label: this.#label, lastEventAt: this.lastEventAt };
     }),
     screenshot: () => this.#serial(async () => (await this.cdp.send('Page.captureScreenshot', { format: 'png' }, this.#sid)).data as string),
+    /**
+     * 画面の作りを木で返す（拡張のセレクタを探すため）。読むだけ。
+     * テキストは textChars 文字で切る（中身を読みたいときは read を使う）。
+     */
+    outline: (selector = 'body', depth = 6, maxNodes = 400, textChars = 12) => this.#serial(() => this.#eval(`(() => {
+      const root = document.querySelector(${JSON.stringify(selector)});
+      if (!root) return null;
+      let n = 0;
+      const keep = ['id', 'class', 'role', 'aria-label', 'data-testid', 'href', 'type', 'name', 'contenteditable'];
+      const walk = (el, d) => {
+        if (n++ >= ${Number(maxNodes)}) return '…';
+        const attrs = {};
+        for (const a of el.attributes) if (keep.includes(a.name) || a.name.startsWith('data-')) attrs[a.name] = a.value.slice(0, 80);
+        const own = [...el.childNodes].filter((c) => c.nodeType === 3).map((c) => c.textContent.trim()).join(' ').trim();
+        const node = { tag: el.tagName.toLowerCase(), ...attrs };
+        if (own) node.text = own.length > ${Number(textChars)} ? own.slice(0, ${Number(textChars)}) + '…(' + own.length + ')' : own;
+        const kids = [...el.children].filter((c) => !['SCRIPT', 'STYLE', 'WATARI-TAG'].includes(c.tagName));
+        if (kids.length) node.children = d >= ${Number(depth)} ? '(' + kids.length + ' 個)' : kids.map((c) => walk(c, d + 1));
+        return node;
+      };
+      return { nodes: walk(root, 0), truncated: n > ${Number(maxNodes)} };
+    })()`)),
   };
 
   /** 拡張に渡す道具。拡張の処理はもう列の中にいるので、#serial は通さない。 */
