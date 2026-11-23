@@ -108,6 +108,49 @@ test('1 時間の上限を超えた分は「まとめ」1 件に畳む。自分�
   assert.match(sent[2].line, /kind=summary count=2 stream=2 部屋/);
 });
 
+test('書き手の種類: 所属全体の既定で Bot を起こさない（名指しの部屋でも）。分からない書き手は通す', async () => {
+  cfg.authorKinds = ['human'];
+  put([item({ stream: 'b1', streamName: 'Bot宛て', toMe: true, authorKind: 'bot' }), item({ stream: 'boss', streamName: '名指しのBot', authorKind: 'bot' })]);
+  put([item({ stream: 'b2', streamName: '人', toMe: true, authorKind: 'human' }), item({ stream: 'b3', streamName: '分からない', toMe: true })]);
+  await sleep(400);
+  assert.deepEqual(sent.map((s) => s.line.match(/stream=(\S+)/)![1]).sort(), ['人', '分からない'], sent.map((s) => s.line).join('\n'));
+});
+
+test('条件の書き手の種類: その種類の発言だけに当たる', async () => {
+  cfg.rules = [{ name: 'botAlert', authorKinds: ['bot'], keywords: ['障害'] }];
+  put([item({ stream: 'c1', authorKind: 'bot', text: '障害が起きました' }), item({ stream: 'c2', authorKind: 'human', text: '障害の話' })]);
+  await sleep(400);
+  assert.deepEqual(sent.map((s) => s.line.match(/rules=(\S+)/)![1]), ['botAlert']);
+});
+
+test('持ち主が直近に話した部屋の発言で起こす（会話の続き）', async () => {
+  cfg.rules = [{ name: 'spoke', spokeRecentlyHours: 2 }];
+  put([item({ stream: 'talk', mine: true, at: new Date(Date.now() - 30 * 60000).toISOString() })]);
+  put([item({ stream: 'talk', text: '返事です' }), item({ stream: 'other', text: '別の部屋' })]);
+  await sleep(400);
+  assert.equal(sent.length, 1, sent.map((s) => s.line).join('\n'));
+  assert.match(sent[0].line, /rules=spoke/);
+});
+
+test('持ち主が話したのが 2 時間より前なら、会話の続きとしては起こさない', async () => {
+  cfg.rules = [{ name: 'spoke', spokeRecentlyHours: 2 }];
+  cfg.maxAgeMinutes = 600;
+  put([item({ stream: 'talk', mine: true, at: new Date(Date.now() - 3 * 3600_000).toISOString() })]);
+  put([item({ stream: 'talk', text: '返事です' })]);
+  await sleep(400);
+  assert.equal(sent.length, 0);
+});
+
+test('自分の 1:1 は静けさを待たずに出す', async () => {
+  cfg.quietSeconds = 5; // ほかの部屋は 5 秒待つ設定
+  const t0 = Date.now();
+  put([item({ stream: 'me-dm', text: 'Claude さん、これお願い' })]);
+  put([item({ stream: 'g9', toMe: true })]);
+  await sleep(150);
+  assert.deepEqual(sent.map((s) => s.line.match(/rules=(\S+)/)![1]), ['self'], '自分の 1:1 が待たされている');
+  assert.ok(Date.now() - t0 < 1000);
+});
+
 test('届かなかった数・AI がまだ読んでいない発火の数が状態に出る', async () => {
   put([item({ stream: 'r1', toMe: true })]);
   await sleep(400);

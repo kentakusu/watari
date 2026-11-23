@@ -20,6 +20,10 @@ export type TriggerRule = {
   keywords?: string[];
   /** 書き手の id か名前（どれか 1 つ・名前は部分一致） */
   authors?: string[];
+  /** 書き手の種類（human / bot のどれか） */
+  authorKinds?: string[];
+  /** 持ち主がその部屋でこの時間内に発言していれば当たる（会話の続きを拾う） */
+  spokeRecentlyHours?: number;
 };
 
 export type TriggerConfig = {
@@ -35,6 +39,13 @@ export type TriggerConfig = {
   selfStreams?: string[];
   /** 名指しの部屋（持ち主が先に読んでいても起こす） */
   namedStreams?: string[];
+  /**
+   * 起こしてよい書き手の種類（所属全体の既定・selfStreams と namedStreams にも効く）。例: ["human"]。
+   * 書き手の種類が分からない発言（authorKind が無い）は通す
+   */
+  authorKinds?: string[];
+  /** selfStreams の静けさ（既定 0 = 待たずにすぐ出す） */
+  selfQuietSeconds?: number;
   rules?: TriggerRule[];
 };
 
@@ -44,7 +55,8 @@ type Pending = { stream: string; streamName?: string; kind: string; rules: Set<s
 
 const D = { maxAgeMinutes: 60, quietSeconds: 20, maxWaitSeconds: 120, hourlyLimit: 30 };
 
-export function matchedRules(item: LedgerItem, cfg: TriggerConfig): string[] {
+/** spokeRecently: 持ち主がその部屋で hours 時間内に発言したか（台帳の mine の発言で判定する） */
+export function matchedRules(item: LedgerItem, cfg: TriggerConfig, spokeRecently: (stream: string, hours: number) => boolean = () => false): string[] {
   const out: string[] = [];
   if (cfg.selfStreams?.includes(item.stream)) out.push('self');
   if (cfg.namedStreams?.includes(item.stream)) out.push('named');
@@ -57,6 +69,8 @@ export function matchedRules(item: LedgerItem, cfg: TriggerConfig): string[] {
     if (r.streams?.length) conds.push(r.streams.includes(item.stream));
     if (r.keywords?.length) conds.push(r.keywords.some((k) => (item.text ?? '').includes(k)));
     if (r.authors?.length) conds.push(r.authors.some((a) => item.author === a || (!!item.authorName && item.authorName.includes(a))));
+    if (r.authorKinds?.length) conds.push(!!item.authorKind && r.authorKinds.includes(item.authorKind));
+    if (r.spokeRecentlyHours) conds.push(spokeRecently(item.stream, r.spokeRecentlyHours));
     if (conds.length && conds.every(Boolean)) out.push(r.name);
   }
   return out;
@@ -69,6 +83,7 @@ export function skipReason(item: LedgerItem, cfg: TriggerConfig, enabledAt: stri
   if (item.at < enabledAt) return '有効にする前の発言';
   if (now - Date.parse(item.at) > (cfg.maxAgeMinutes ?? D.maxAgeMinutes) * 60000) return '古すぎる';
   if (item.recalled) return '取り消し';
+  if (cfg.authorKinds?.length && item.authorKind && !cfg.authorKinds.includes(item.authorKind)) return `書き手の種類（${item.authorKind}）`;
   if (item.mine && !self) return '自分の発言';
   if (!self && !named && item.seq !== undefined && ownerReadSeq !== undefined && item.seq <= ownerReadSeq) return '持ち主が先に読んだ';
   return null;
@@ -112,7 +127,7 @@ export class TriggerEngine {
     for (const item of items) {
       const why = skipReason(item, cfg, enabledAt, this.#ownerRead(item.stream));
       if (why) continue;
-      const rules = matchedRules(item, cfg);
+      const rules = matchedRules(item, cfg, (stream, hours) => this.#spokeRecently(stream, hours));
       if (!rules.length) continue;
       this.#add(item, rules, cfg);
     }
@@ -130,7 +145,15 @@ export class TriggerEngine {
     p.items.push(item);
     clearTimeout(p.quiet);
     const pp = p;
-    p.quiet = setTimeout(() => void this.#fire(pp), (cfg.quietSeconds ?? D.quietSeconds) * 1000);
+    // 自分の 1:1 は待たずに出す（同じ取り込みの中で続けて入った分だけはまとまる）
+    const quiet = p.self ? (cfg.selfQuietSeconds ?? 0) : (cfg.quietSeconds ?? D.quietSeconds);
+    p.quiet = setTimeout(() => void this.#fire(pp), quiet * 1000);
+  }
+
+  /** 持ち主がその部屋で hours 時間内に発言したか（台帳の mine の発言の時刻で見る） */
+  #spokeRecently(stream: string, hours: number): boolean {
+    const since = new Date(Date.now() - hours * 3600_000).toISOString();
+    return !!this.#db.prepare('SELECT 1 FROM items WHERE stream = ? AND mine = 1 AND at >= ? LIMIT 1').get(stream, since);
   }
 
   /** 待たずに今まとまっている分を出す（試験と、止めるとき用） */
