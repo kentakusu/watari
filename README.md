@@ -122,6 +122,8 @@ async onCapture(c, w) { /* c.body を読み解いて w.notify(...) */ },
 
 `w.state.get(key)` / `w.state.set(key, value)` / `w.state.delete(key)` で、小さな状態（例: どの番号まで知らせたか）を残せます。所属と拡張ごとに `state/<所属>/<拡張>.json` に置かれ、常駐の再起動をまたいで残ります。1MB を超える書き込みは断ります（本文や記録の置き場にしないため）。
 
+`w.config()` で、この所属の設定（`triggers`・`identity`・`outbox`）の写しを読めます。拡張に同じ値（自分の 1:1 の部屋など）を二重に書かないためです。読むたびに今の設定が返り、書き換えても本体の設定は変わりません。
+
 ### 発言の台帳と、起こす条件
 
 チャット・メール・通知のような「発言」を、拡張が読み解いて `w.ledger.put([...])` で渡すと、渡が所属ごとの台帳（`ledger/<所属>.db`・SQLite）に残します。
@@ -170,7 +172,7 @@ w.ledger.setOwnerRead('room-123', 455);                  // 持ち主がどこ�
 }
 ```
 
-- 起こさないもの: 有効にした時刻（`enabledAt`。書かなければ常駐が起きた時刻）より前・`maxAgeMinutes` より古い・最初の一括取り込み・取り消し・自分の発言（`selfStreams` は別）・持ち主が先に読んだ発言（`namedStreams` と `selfStreams` は別）・所属全体の `authorKinds`（例: `["human"]`）に入っていない書き手の種類（`selfStreams` と `namedStreams` にも効く。書き手の種類が分からない発言は通す）。
+- 起こさないもの: 有効にした時刻（`enabledAt`。書かなければ、この所属で起こす条件を初めて使った時刻。台帳に残るので、常駐を起こし直しても動かない）より前・`maxAgeMinutes` より古い・最初の一括取り込み（拡張が `initial` を付けたもの。付けなくても、この所属で台帳に初めて入る発言はそうみなす）・取り消し・自分の発言（`selfStreams` は別）・持ち主が先に読んだ発言（`namedStreams` と `selfStreams` は別）・所属全体の `authorKinds`（例: `["human"]`）に入っていない書き手の種類（`selfStreams` と `namedStreams` にも効く。書き手の種類が分からない発言は通す）。
 - 条件には、ほかに `authorKinds`（書き手の種類）と `spokeRecentlyHours`（持ち主がその部屋でこの時間内に発言していれば当たる＝会話の続き）を書けます。
 - `selfStreams` は静けさを待たずに出します（`selfQuietSeconds`・既定 0）。
 - `linePrefix` / `lineSuffix` で、知らせの 1 行の頭と尾に固定の文を付けられます（どこから来た知らせか・受け取った人が何をする行かを決めるため）。改行は空白にして 1 行を保ちます。発言の本文は入りません。

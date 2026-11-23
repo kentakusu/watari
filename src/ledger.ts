@@ -178,6 +178,11 @@ export class Ledger {
     return res;
   }
 
+  /** まだ 1 件も見たことがない（この所属の最初の取り込みかどうかに使う。消したあとも見たことは残る） */
+  neverSeen(): boolean {
+    return !this.db.prepare('SELECT 1 FROM seen LIMIT 1').get();
+  }
+
   get(stream: string, id: string): LedgerItem | undefined {
     const r = this.db.prepare('SELECT * FROM items WHERE stream = ? AND id = ?').get(stream, id);
     return r ? rowToItem(r) : undefined;

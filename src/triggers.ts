@@ -99,7 +99,11 @@ export class TriggerEngine {
   #send: (to: string, line: string) => Promise<void>;
   #log: (rec: object) => void;
   #ownerRead: (stream: string) => number | undefined;
-  #startedAt = new Date().toISOString();
+  /**
+   * 設定に enabledAt が無いときの「有効にした時刻」。この所属で起こす条件を初めて使った時刻を台帳に残し、起こし直しても引き継ぐ。
+   * （以前は作った瞬間の時刻にしていたので、常駐を起こし直すたびに、そのあと最初に入った発言で起こしていなかった）
+   */
+  #enabledAt = '';
   #pending = new Map<string, Pending>();
   #overflow: Pending[] = [];
   #recent: number[] = [];
@@ -113,6 +117,9 @@ export class TriggerEngine {
     this.#ownerRead = opts.ownerRead;
     this.#db.exec(`CREATE TABLE IF NOT EXISTS fires (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, stream TEXT NOT NULL, stream_name TEXT,
       rules TEXT NOT NULL, kind TEXT NOT NULL, count INTEGER NOT NULL, items_json TEXT NOT NULL, to_session TEXT, status TEXT NOT NULL, error TEXT)`);
+    this.#db.exec('CREATE TABLE IF NOT EXISTS trigger_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+    this.#db.prepare(`INSERT OR IGNORE INTO trigger_meta (key, value) VALUES ('enabled_at', ?)`).run(new Date().toISOString());
+    this.#enabledAt = (this.#db.prepare(`SELECT value FROM trigger_meta WHERE key = 'enabled_at'`).get() as any).value;
     this.#sweeper = setInterval(() => void this.flushOverflow(), 60000);
     this.#sweeper.unref?.();
   }
@@ -127,7 +134,7 @@ export class TriggerEngine {
   consider(items: LedgerItem[], opt: { initial?: boolean } = {}): void {
     const cfg = this.#config();
     if (!cfg || opt.initial) return;
-    const enabledAt = cfg.enabledAt ?? this.#startedAt;
+    const enabledAt = cfg.enabledAt ?? this.#enabledAt;
     for (const item of items) {
       const why = skipReason(item, cfg, enabledAt, this.#ownerRead(item.stream));
       if (why) continue;
