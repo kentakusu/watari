@@ -10,7 +10,7 @@ import { isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Affiliation, type Extension } from './watari.ts';
 import { configuredNotifier } from './notify.ts';
-import { ensureToken, restrictHome, perAffiliation, keepOpenList, readConfig, readDaemonInfo, readExtensions, readWindows, writeDaemonInfo, writeExtensions, writeWindows, type ExtensionRecord, type WindowRecord } from './home.ts';
+import { ensureToken, restrictHome, perAffiliation, keepOpenList, readConfig, readDaemonInfo, readDisplay, readExtensions, readWindows, writeDaemonInfo, writeDisplay, writeExtensions, writeWindows, type Display, type ExtensionRecord, type WindowRecord } from './home.ts';
 
 export type DaemonOptions = { home: string; port?: number; headless?: boolean; missingGraceMs?: number; notifyOverride?: (session: string, text: string) => Promise<void> };
 
@@ -76,7 +76,8 @@ export async function startDaemon(opts: DaemonOptions) {
     if (a && a.running) return a;
     if (!start) throw new Error(`所属 ${name} の Chrome は動いていません`);
     a = new Affiliation({
-      name, home, notifier, headless: opts.headless ?? cfg.headless, missingGraceMs: opts.missingGraceMs ?? cfg.missingGraceMs,
+      // 見せ方は所属ごと（display.json）。試験などで headless を指定したときはそれに従う
+      name, home, notifier, headless: opts.headless ?? (readDisplay(home)[name] === 'hidden' || !!cfg.headless), missingGraceMs: opts.missingGraceMs ?? cfg.missingGraceMs,
       // 毎回読む（設定の triggers を書き換えれば、常駐を起こし直さなくても次の発言から効く）
       triggerConfig: () => triggerConfigOf(name),
       outboxConfig: () => { const o = readConfig(home).outbox; return o?.[name] ?? o?.['*']; },
@@ -86,6 +87,12 @@ export async function startDaemon(opts: DaemonOptions) {
     a.onWindowsChanged = () => saveWindows();
     a.onWindowClosed = (w) => void onLost(a, [w], 'window');
     a.onChromeExited = (lost) => void onLost(a, lost, 'chrome');
+    // 窓のある Chrome で、keepOpen の窓の閉じるボタンが押されたら、閉じずに「裏で動かす」に切り替える
+    a.onCloseRequested = (session) => {
+      if (displayOf(a) !== 'visible' || !keepOpenList(readConfig(home).keepOpen).includes(session)) return false;
+      void setDisplay(a.name, 'hidden', `閉じるボタン（${session}）`).catch((e) => a.log({ type: 'display-switch-failed', error: String(e?.message ?? e) }));
+      return true;
+    };
     await a.start();
     await a.setExtensions(await extensionsFor(name));
     affiliations.set(name, a);
@@ -142,6 +149,39 @@ export async function startDaemon(opts: DaemonOptions) {
       } finally {
         reopening.delete(w.session);
       }
+    }
+  }
+
+  // ---- 見せ方の切り替え（裏で動かす ⇔ 窓を出す） ----
+  // 画面の有る無しは Chrome を起こすときにしか決められないので、その所属の Chrome を起こし直す。
+  // 開いていた窓は覚えておいて開き直す（ログインはプロファイルに残る）。渡が自分で止めるので、閉じた知らせ・開き直しは動かない。
+  const switching = new Set<string>();
+
+  // 今の見せ方は置き場の記録（display.json）が正。Chrome を画面なしで起こすかどうかは、それと試験の指定から決まる
+  function displayOf(a: Affiliation): Display {
+    return readDisplay(home)[a.name] ?? 'visible';
+  }
+
+  async function setDisplay(name: string, d: Display, by: string): Promise<{ name: string; display: Display; changed: boolean; windows: string[] }> {
+    if (switching.has(name)) throw new Error(`所属 ${name} は、いま切り替えている最中です`);
+    const before = readDisplay(home)[name] ?? 'visible';
+    writeDisplay(home, name, d);
+    const a = affiliations.get(name);
+    if (!a?.running) return { name, display: d, changed: false, windows: [] }; // 次に起こすときから効く
+    if (before === d) return { name, display: d, changed: false, windows: [...a.windows.keys()] };
+    switching.add(name);
+    try {
+      const snapshot = [...a.windows.values()].map((w) => ({ session: w.session, url: w.url, label: w.label }));
+      const started = Date.now();
+      await a.stop();
+      affiliations.delete(name);
+      const b = await aff(name);
+      for (const w of snapshot) await b.openWindow(w.session, w.url, w.label);
+      saveWindows();
+      b.log({ type: 'display-switched', display: d, by, windows: snapshot.map((w) => w.session), ms: Date.now() - started });
+      return { name, display: displayOf(b), changed: true, windows: snapshot.map((w) => w.session) };
+    } finally {
+      switching.delete(name);
     }
   }
 
@@ -205,7 +245,7 @@ export async function startDaemon(opts: DaemonOptions) {
       pid: process.pid, startedAt, port, homeAccess,
       loadErrors, restoreErrors,
       affiliations: [...affiliations.values()].map((a) => ({
-        name: a.name, running: a.running, startedAt: a.startedAt,
+        name: a.name, running: a.running, startedAt: a.startedAt, display: displayOf(a),
         extensions: a.extensions.map((e) => e.name),
         // 台帳を使っている所属だけ（使っていない所属にファイルを作らない）
         ledger: existsSync(join(home, 'ledger', `${a.name}.db`)) ? {
@@ -340,6 +380,11 @@ export async function startDaemon(opts: DaemonOptions) {
       await applyRegistry(p.affiliation);
       return { ok: true };
     },
+    'affiliation.display': async (p) => {
+      const name = affName(p.name);
+      if (p.display !== 'hidden' && p.display !== 'visible') throw new Error(`display は 'hidden'（裏で動かす）か 'visible'（窓を出す）: ${p.display}`);
+      return setDisplay(name, p.display, String(p.by ?? '依頼'));
+    },
     'affiliation.stop': async (p) => {
       const a = affiliations.get(p.name);
       if (!a) throw new Error(`所属 ${p.name} は動いていません`);
@@ -418,7 +463,8 @@ export async function startDaemon(opts: DaemonOptions) {
     try { unlinkSync(join(home, 'daemon.json')); } catch {}
   }
 
-  return { port, stop, methods };
+  // affiliation: 試験と試しのために、動いている所属を外から見る口（口〔RPC〕には出さない）
+  return { port, stop, methods, affiliation: (name: string) => affiliations.get(name) };
 }
 
 // node src/daemon.ts [--home <dir>] で起動

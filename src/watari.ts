@@ -172,6 +172,13 @@ export class Affiliation {
     return s;
   }
   get running(): boolean { return !!this.browser && !this.browser.cdp.closed; }
+  /** 画面の無い Chrome で動いているか（裏で動かしている） */
+  get headless(): boolean { return this.#headless; }
+  /**
+   * 人が閉じるボタンを押した（閉じずに止めた）とき。true を返せば、窓の最小化はしない
+   * （常駐が「裏で動かす」に切り替えるときなど）
+   */
+  onCloseRequested?: (session: string) => boolean;
 
   log(rec: object): void {
     const line = JSON.stringify({ at: now(), affiliation: this.name, ...rec });
@@ -399,12 +406,18 @@ export class SessionWindow {
       try { msg = JSON.parse(p.payload); } catch { return; }
       this.#onMessage(msg);
     });
-    cdp.on('Page.frameNavigated', (p, sid) => { if (sid === this.#sid && !p.frame.parentId) this.url = p.frame.url; });
+    cdp.on('Page.frameNavigated', (p, sid) => { if (sid === this.#sid && !p.frame.parentId) { this.url = p.frame.url; this.#armedThisLoad = false; } });
 
     await cdp.send('Page.enable', {}, sessionId);
     await cdp.send('Runtime.enable', {}, sessionId);
     // 背景の窓でも入力が通るように「前面にある」と思わせる
     await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }, sessionId);
+    // 画面の無い Chrome は、サイトに名乗る名前（UA）に「HeadlessChrome」と入る。ふつうの Chrome の名前で名乗る
+    if (this.#aff.headless) {
+      const v = await cdp.send('Browser.getVersion');
+      const ua = String(v.userAgent).replace('HeadlessChrome', 'Chrome');
+      await cdp.send('Emulation.setUserAgentOverride', { userAgent: ua }, sessionId);
+    }
     await cdp.send('Runtime.addBinding', { name: BINDING, executionContextName: WORLD }, sessionId);
     await this.#installScript();
     this.#tap = new NetworkTap(cdp, sessionId);
@@ -481,6 +494,7 @@ export class SessionWindow {
    * それでも閉じてしまったときは、keepOpen の開き直しが受け止める。渡が自分で閉じるとき（Target.closeTarget）は問いを通らない。
    */
   #guarded = false;
+  #armedThisLoad = false;
   /** ページ自身が移動を始めてから、その移動が終わるまで（この間の問いは読み直し・移動なので通す） */
   #navPendingSince = 0;
   async #armCloseGuard(): Promise<void> {
@@ -501,7 +515,7 @@ export class SessionWindow {
       void cdp.send('Page.handleJavaScriptDialog', { accept: isNavigation }, sid).catch(() => {});
       if (!isNavigation) {
         this.#aff.log({ type: 'close-to-background', session: this.session });
-        void this.minimize();
+        if (!this.#aff.onCloseRequested?.(this.session)) void this.minimize();
       }
     });
     // 問いの仕掛けはページの世界に入れる（読み直しても入るように）
@@ -510,13 +524,15 @@ export class SessionWindow {
 
   /** 読み込みのたびに、名札の名前の部分を 1 回押して「人が触った」状態にする（閉じる問いを出せるように） */
   async #activateForGuard(): Promise<void> {
-    if (!this.#guarded || this.#touching) return;
+    // ページ全体の読み込み 1 回につき 1 回だけ（中の枠の読み込みや、拡張の入れ替えでは押し直さない）
+    if (!this.#guarded || this.#touching || this.#armedThisLoad) return;
+    this.#armedThisLoad = true;
     try {
       const at = await this.#eval('globalThis.__watariTagNameRect && globalThis.__watariTagNameRect()');
-      if (!at) return;
+      if (!at) { this.#armedThisLoad = false; return; } // まだ名札が無い: 次の機会に押し直す
       await this.#mouse(at.x, at.y);
       this.#aff.log({ type: 'close-guard-armed', session: this.session });
-    } catch {}
+    } catch { this.#armedThisLoad = false; } // 読み込み中などで押せなかった: 次の機会に押し直す
   }
 
   /** 窓を最小化する（画面に窓が無い headless では何もしない） */
