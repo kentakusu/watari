@@ -93,6 +93,30 @@ test('消したあとに同じ発言を取り直しても、新しいものと�
   assert.equal(r.seenBefore, 1);
 });
 
+test('部屋の発言を時刻の順にページでめくれる（同じ時刻も飛ばさない・読んだ印は付けない）', () => {
+  // 7 件。うち 2 件は同じ時刻
+  const xs: LedgerItemInput[] = [1, 2, 3, 4, 5, 6, 7].map((n) => ({ stream: 'page-room', id: `p${n}`, seq: n, at: `2026-11-23T10:0${n === 5 ? 4 : n}:00Z`, text: `第${n}` }));
+  L.put(xs);
+  const seen: string[] = [];
+  let cursor: string | undefined;
+  let pages = 0;
+  do {
+    const r = L.list('page-room', { limit: 3, cursor });
+    seen.push(...r.items.map((x) => x.id));
+    cursor = r.next;
+    pages++;
+  } while (cursor && pages < 10);
+  assert.deepEqual(seen, ['p7', 'p6', 'p5', 'p4', 'p3', 'p2', 'p1'], '飛ばしたか重なった');
+  assert.equal(pages, 3);
+  // 古い順・seq で始める・時刻で始める
+  assert.deepEqual(L.list('page-room', { order: 'asc', limit: 2 }).items.map((x) => x.id), ['p1', 'p2']);
+  assert.deepEqual(L.list('page-room', { before: 3 }).items.map((x) => x.id), ['p2', 'p1']);
+  assert.deepEqual(L.list('page-room', { after: '2026-11-23T10:05:00Z', order: 'asc' }).items.map((x) => x.id), ['p6', 'p7']);
+  // 読んだ印は付けない
+  assert.ok(L.list('page-room', { limit: 100 }).items.every((x) => !x.aiReadAt));
+  assert.throws(() => L.list('page-room', { cursor: 'こわれた' }), /cursor の形が違います/);
+});
+
 test('形の違う発言は、1 件も入れずに断る', () => {
   const before = L.unread({ limit: 500 }).length;
   assert.throws(() => L.put([{ stream: 'z', id: 'ok', at: '2026-11-23T00:00:00Z' }, { stream: 'z', id: '', at: 'x' } as any]), /id が要ります/);

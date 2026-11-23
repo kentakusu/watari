@@ -252,6 +252,36 @@ export class Ledger {
     return { item: this.get(stream, id)!, before, replyTo, contextGap };
   }
 
+  /**
+   * ある stream の発言を、時刻の順に並べてページごとに返す（読んだ印は付けない）。
+   * cursor は前のページの next をそのまま渡す。最初のページは before / after（ISO の時刻か seq）で始める。
+   * 同じ時刻の発言があっても飛ばさないよう、並びと位置は (時刻, id) の組で持つ。
+   */
+  list(stream: string, opt: { order?: 'desc' | 'asc'; limit?: number; cursor?: string; before?: string | number; after?: string | number } = {}): { items: LedgerItem[]; next?: string } {
+    const order = opt.order === 'asc' ? 'asc' : 'desc';
+    const limit = Math.min(Math.max(opt.limit ?? 100, 1), 1000);
+    const where: string[] = ['stream = ?'];
+    const args: Array<string | number> = [stream];
+    if (opt.cursor) {
+      const i = opt.cursor.indexOf('|');
+      if (i < 0) throw new Error(`cursor の形が違います（前のページの next をそのまま渡してください）: ${opt.cursor}`);
+      const at = opt.cursor.slice(0, i), id = opt.cursor.slice(i + 1);
+      where.push(order === 'desc' ? '(at < ? OR (at = ? AND id < ?))' : '(at > ? OR (at = ? AND id > ?))');
+      args.push(at, at, id);
+    }
+    const bound = (v: string | number, op: '<' | '>') => {
+      if (typeof v === 'number' || /^\d+$/.test(String(v))) { where.push(`seq ${op} ?`); args.push(Number(v)); }
+      else { where.push(`at ${op} ?`); args.push(iso(v)); }
+    };
+    if (opt.before !== undefined) bound(opt.before, '<');
+    if (opt.after !== undefined) bound(opt.after, '>');
+    const dir = order === 'desc' ? 'DESC' : 'ASC';
+    const rows = this.db.prepare(`SELECT * FROM items WHERE ${where.join(' AND ')} ORDER BY at ${dir}, id ${dir} LIMIT ?`).all(...args, limit) as any[];
+    const items = rows.map(rowToItem);
+    const last = items.at(-1);
+    return { items, next: items.length === limit && last ? `${last.at}|${last.id}` : undefined };
+  }
+
   /** 全文検索（新しい順）。3 文字以上は trigram、2 文字以下は LIKE */
   search(q: string, opt: { stream?: string; limit?: number } = {}): LedgerItem[] {
     const limit = Math.min(Math.max(opt.limit ?? 50, 1), 500);

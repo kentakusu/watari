@@ -135,6 +135,17 @@ tool('ledger_read', '発言を、前の数件（流れ）と返信先と一緒�
   },
   async (a) => text(JSON.stringify(await daemon.call('ledger.read', { affiliation: affiliation(), stream: a.stream, id: a.id, triggerId: a.trigger_id, context: a.context }), null, 2)));
 
+tool('ledger_list', 'ある部屋（stream）の発言を、時刻の順に並べてページごとに返す（写しや見返し用。読んだ印は付けない）。次のページは、返った next を cursor に渡す。最初のページは before / after（ISO の時刻か seq の数）で始められる。',
+  {
+    stream: z.string(),
+    order: z.enum(['desc', 'asc']).optional().describe('desc: 新しい順（既定）／asc: 古い順'),
+    limit: z.number().int().min(1).max(1000).optional().describe('1 ページの件数（既定 100）'),
+    cursor: z.string().optional().describe('前のページの next'),
+    before: z.string().optional().describe('これより前（ISO の時刻か seq の数）'),
+    after: z.string().optional().describe('これより後（ISO の時刻か seq の数）'),
+  },
+  async (a) => text(JSON.stringify(await daemon.call('ledger.list', { affiliation: affiliation(), ...a }), null, 2)));
+
 tool('ledger_search', '発言の台帳を全文で探す（本文・部屋の名前・書き手の名前の部分一致・新しい順）。読んだ印は付けない。',
   { q: z.string(), stream: z.string().optional(), limit: z.number().int().min(1).max(500).optional() },
   async (a) => text(JSON.stringify(await daemon.call('ledger.search', { affiliation: affiliation(), q: a.q, stream: a.stream, limit: a.limit }), null, 2)));

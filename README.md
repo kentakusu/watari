@@ -175,7 +175,7 @@ w.ledger.setOwnerRead('room-123', 455);                  // 持ち主がどこ�
 - 1 時間に `hourlyLimit` を超えた分は「まとめ」1 件に畳みます（`selfStreams` は上限の外）。
 - 設定を書き換えると、常駐を起こし直さなくても次の発言から効きます。台帳を残す日数は `ledgerRetentionDays`（書き方は `captureRetentionDays` と同じ・既定は期限なし）。
 
-MCP: `ledger_unread`（AI がまだ読んでいない発言・`for_me_only` で宛てだけ）・`ledger_read`（前の流れと返信先と一緒に読み、読んだ印を付ける。流れに抜けがあれば `contextGap`。`trigger_id` を渡すと、その知らせに入った発言をまとめて読む）・`ledger_search`（全文）・`ledger_fires`（最近の知らせと、届かなかった数・AI がまだ読んでいない知らせの数と最古の時刻）。
+MCP: `ledger_unread`（AI がまだ読んでいない発言・`for_me_only` で宛てだけ）・`ledger_read`（前の流れと返信先と一緒に読み、読んだ印を付ける。流れに抜けがあれば `contextGap`。`trigger_id` を渡すと、その知らせに入った発言をまとめて読む）・`ledger_list`（ある部屋の発言を時刻の順にページでめくる。写しや見返し用で、読んだ印は付けない）・`ledger_search`（全文）・`ledger_fires`（最近の知らせと、届かなかった数・AI がまだ読んでいない知らせの数と最古の時刻）。
 
 ### 送る口（関所つき）
 

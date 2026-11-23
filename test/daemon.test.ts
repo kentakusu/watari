@@ -84,7 +84,7 @@ test('口: 合言葉なしでは断る・生死の確認だけは通す', async 
 
 test('MCP の道具がそろっている', async () => {
   const names = (await mcp.listTools()).tools.map((t) => t.name).sort();
-  for (const n of ['open_window', 'window_info', 'read', 'collect', 'click', 'type_text', 'press_key', 'scroll_until', 'screenshot', 'dom_outline', 'set_display', 'set_label', 'list_extensions', 'install_extension', 'remove_extension', 'search_captures', 'recent_log', 'ledger_unread', 'ledger_read', 'ledger_search', 'ledger_fires', 'send_message', 'outbox_list', 'watari_status']) {
+  for (const n of ['open_window', 'window_info', 'read', 'collect', 'click', 'type_text', 'press_key', 'scroll_until', 'screenshot', 'dom_outline', 'set_display', 'set_label', 'list_extensions', 'install_extension', 'remove_extension', 'search_captures', 'recent_log', 'ledger_unread', 'ledger_read', 'ledger_list', 'ledger_search', 'ledger_fires', 'send_message', 'outbox_list', 'watari_status']) {
     assert.ok(names.includes(n), `${n} がありません: ${names.join(',')}`);
   }
 });
