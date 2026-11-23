@@ -161,6 +161,7 @@ w.ledger.setOwnerRead('room-123', 455);                  // 持ち主がどこ�
 - 起こさないもの: 有効にした時刻（`enabledAt`。書かなければ常駐が起きた時刻）より前・`maxAgeMinutes` より古い・最初の一括取り込み・取り消し・自分の発言（`selfStreams` は別）・持ち主が先に読んだ発言（`namedStreams` と `selfStreams` は別）・所属全体の `authorKinds`（例: `["human"]`）に入っていない書き手の種類（`selfStreams` と `namedStreams` にも効く。書き手の種類が分からない発言は通す）。
 - 条件には、ほかに `authorKinds`（書き手の種類）と `spokeRecentlyHours`（持ち主がその部屋でこの時間内に発言していれば当たる＝会話の続き）を書けます。
 - `selfStreams` は静けさを待たずに出します（`selfQuietSeconds`・既定 0）。
+- `linePrefix` / `lineSuffix` で、知らせの 1 行の頭と尾に固定の文を付けられます（どこから来た知らせか・受け取った人が何をする行かを決めるため）。改行は空白にして 1 行を保ちます。発言の本文は入りません。
 - 1 つの条件の中は「全部に当たる」、条件どうしは「どれかに当たる」です。配列の中は「どれか 1 つ」です。書き手（`authors`）は id か名前の部分一致です。
 - 同じ部屋の続けての発言は、`quietSeconds` 静かになるまで（最長 `maxWaitSeconds`）待って 1 回にまとめます。
 - 1 時間に `hourlyLimit` を超えた分は「まとめ」1 件に畳みます（`selfStreams` は上限の外）。

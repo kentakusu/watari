@@ -44,6 +44,16 @@ test('条件に当たった発言で、本文を含まない 1 行を知らせ�
   assert.ok(!sent[0].line.includes('秘密'), '本文が知らせに入っている');
 });
 
+test('知らせの 1 行の頭と尾に、所属ごとの固定の文を付けられる（改行は空白にして 1 行を保つ）', async () => {
+  cfg.linePrefix = '【渡の発火】';
+  cfg.lineSuffix = '／ ledger_read で読む\n次の行';
+  put([item({ toMe: true, text: '本文' })]);
+  await sleep(400);
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].line, /^【渡の発火】 trigger id=\d+ rules=toMe kind=group count=1 stream=営業 ／ ledger_read で読む 次の行$/);
+  assert.ok(!sent[0].line.includes('\n'));
+});
+
 test('どの条件にも当たらない発言では起こさない', async () => {
   put([item()]);
   await sleep(400);

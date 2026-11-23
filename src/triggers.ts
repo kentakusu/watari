@@ -46,6 +46,10 @@ export type TriggerConfig = {
   authorKinds?: string[];
   /** selfStreams の静けさ（既定 0 = 待たずにすぐ出す） */
   selfQuietSeconds?: number;
+  /** 知らせの 1 行の頭に付ける固定の文（どこから来た知らせか・何をする行かを決めるため）。間は空白 1 つ */
+  linePrefix?: string;
+  /** 知らせの 1 行の尾に付ける固定の文。間は空白 1 つ */
+  lineSuffix?: string;
   rules?: TriggerRule[];
 };
 
@@ -198,7 +202,10 @@ export class TriggerEngine {
       .run(at, stream, streamName ?? null, rules.join(','), kind, items.length, JSON.stringify(items), cfg.notifyTo);
     const id = Number(r.lastInsertRowid);
     // 本文は入れない（読むときは ledger_read で引く）
-    const line = `trigger id=${id} rules=${rules.join(',')} kind=${kind} count=${items.length} stream=${streamName ?? stream}`;
+    const core = `trigger id=${id} rules=${rules.join(',')} kind=${kind} count=${items.length} stream=${streamName ?? stream}`;
+    // 頭と尾は設定の固定の文だけ（発言の本文は入れない）。改行は 1 行を保つために空白にする
+    const oneLine = (s?: string) => (s ?? '').replace(/[\r\n]+/g, ' ').trim();
+    const line = [oneLine(cfg.linePrefix), core, oneLine(cfg.lineSuffix)].filter(Boolean).join(' ');
     try {
       await this.#send(cfg.notifyTo, line);
       this.#db.prepare(`UPDATE fires SET status = 'delivered' WHERE id = ?`).run(id);
