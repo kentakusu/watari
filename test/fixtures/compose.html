@@ -1,0 +1,24 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>書いて送るの試験</title>
+<!-- 自分で Enter を受け取るリッチな入力欄（Shift+Enter は改行・Enter は送る）。
+     ?draft=… 書きかけを入れておく／?nosend=1 送っても空にならない／?mangle=1 入れた字を勝手に変える／?go=… 送る文（| は改行） -->
+<div id="ed" contenteditable="true" style="border:1px solid #999; min-height:40px; width:400px"></div>
+<div id="sent"></div>
+<div id="go"></div>
+<script>
+  const q = new URLSearchParams(location.search);
+  const ed = document.getElementById('ed');
+  if (q.get('draft')) ed.textContent = q.get('draft');
+  ed.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    if (e.shiftKey) { document.execCommand('insertLineBreak'); return; }
+    if (q.get('nosend')) return;
+    const s = document.getElementById('sent');
+    s.textContent += (s.textContent ? '／' : '') + ed.innerText.replace(/\n+$/, '').replace(/\n/g, '⏎');
+    ed.innerHTML = '';
+  });
+  if (q.get('mangle')) ed.addEventListener('input', () => { if (ed.textContent.includes('b')) ed.textContent = ed.textContent.replace('b', 'X'); });
+  setTimeout(() => { document.getElementById('go').textContent = q.get('go') || ''; }, 500);
+</script>

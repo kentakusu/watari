@@ -23,6 +23,20 @@ export type WatchEvent = {
 
 export type Key = 'Enter' | 'Backspace' | 'Tab' | 'Escape';
 
+/** 書いて送る手順（拡張が宣言する。サイトの読み方は拡張に残し、決まった手順だけを本体が持つ） */
+export type ComposeSpec = {
+  /** 入力欄（textarea・input・contenteditable） */
+  editor: string;
+  /** 行と行の間に押すキー（既定 Shift+Enter） */
+  newline?: { key: Key; modifiers?: number };
+  /** 送り方: キーを押すか、ボタンを押すか */
+  send: { key: Key; modifiers?: number } | { click: string };
+  /** 入れた文が入力欄に映るまで待つ時間（既定 2000ms。入力が非同期の欄のため） */
+  settleMs?: number;
+  /** 送ったあと入力欄が空になるまで待つ時間（既定 5000ms） */
+  emptyTimeoutMs?: number;
+};
+
 export type ScrollOptions = {
   /** 一覧の中にある要素（そのスクロールできる親を送る。省くとページ全体） */
   within?: string;
@@ -88,6 +102,12 @@ export type WindowApi = {
     /** サイトが言う、その部屋の最新の番号。台帳が追いついていなければ巡回（patrol）が開きに行く */
     setLatest(stream: string, seq: number): void;
   };
+  /**
+   * 書いて送る: 書きかけがあれば送らない → 行ごとに入れる（行の間は newline のキー）→ 入力欄が text と同じか確かめる
+   * （違えば空に戻して投げる）→ 送る → 入力欄が空になるのを待つ（ならなければ空に戻して投げる）。
+   * 送れたかどうかの確かめ（台帳に自分の発言として入るか）は、送る口が別に行う
+   */
+  compose(text: string, spec: ComposeSpec): Promise<{ ms: number }>;
   /** 突く: その部屋を、未読の印が無くても巡回で開き直させる（画面に取り直させる）。間が短いもの・跳ね返りは断る */
   nudge(stream: string): { queued: boolean; reason?: string };
 };
@@ -95,10 +115,12 @@ export type WindowApi = {
 export type Extension = {
   name: string;
   sites: string[];
-  watch: WatchSpec[];
+  /** 画面の見張り（通信だけを読む拡張は省ける） */
+  watch?: WatchSpec[];
   /** 通知の宛先（所属/名前）。省くと、その窓のセッション */
   notifyTo?: string;
-  onChange(e: WatchEvent, w: WindowApi): Promise<void> | void;
+  /** 見張りの値が変わったとき（watch を省くなら、これも省ける） */
+  onChange?(e: WatchEvent, w: WindowApi): Promise<void> | void;
   /** 取る通信。宣言したものだけが記録され（captures/<所属>/<日付>.jsonl）、onCapture に渡る */
   capture?: CaptureSpec[];
   onCapture?(c: Capture, w: WindowApi): Promise<void> | void;
@@ -420,7 +442,7 @@ export class SessionWindow {
   get label() { return this.#label; }
 
   #injectConfig(): InjectConfig {
-    const watches: WatchDecl[] = this.#aff.extensions.flatMap((e) => e.watch.map((w) => ({ ...w, ext: e.name, sites: e.sites })));
+    const watches: WatchDecl[] = this.#aff.extensions.flatMap((e) => (e.watch ?? []).map((w) => ({ ...w, ext: e.name, sites: e.sites })));
     return { label: this.#label, watches, missingGraceMs: this.#aff.missingGraceMs };
   }
 
@@ -635,7 +657,7 @@ export class SessionWindow {
       return;
     }
     try {
-      await ext.onChange({ watch: msg.name, value: msg.value, previous: msg.previous ?? undefined, url: msg.url }, api);
+      await ext.onChange?.({ watch: msg.name, value: msg.value, previous: msg.previous ?? undefined, url: msg.url }, api);
     } catch (e: any) {
       this.#aff.log({ type: 'extension-error', session: this.session, ext: ext.name, error: String(e?.stack ?? e) });
       await api.notify(`【渡 ${ext.name}】拡張が失敗しました: ${e?.message ?? e}`).catch(() => {});
@@ -809,6 +831,58 @@ export class SessionWindow {
     })()`)),
   };
 
+  // ---- 書いて送る ----
+  async #editorText(editor: string): Promise<string | null> {
+    return this.#eval(`(() => { const el = document.querySelector(${JSON.stringify(editor)}); if (!el) return null;
+      return (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') ? el.value : (el.innerText ?? el.textContent ?? ''); })()`);
+  }
+
+  /** 入力欄を空に戻す（全選択して消す） */
+  async #clearEditor(editor: string): Promise<void> {
+    const { x, y } = await this.#center(editor);
+    await this.#mouse(x, y);
+    await this.cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2, commands: ['selectAll'] }, this.#sid);
+    await this.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2 }, this.#sid);
+    await this.#press('Backspace');
+  }
+
+  async #compose(text: string, spec: ComposeSpec): Promise<{ ms: number }> {
+    const started = Date.now();
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    // 比べるときは空白のまとまりを 1 つにする（リッチな入力欄は改行や空白の表し方がまちまちのため）
+    const norm = (v: string | null) => (v ?? '').replace(/\s+/g, ' ').trim(); // \s は改行・ノーブレークスペースも含む
+    await this.#waitUntilFree();
+    const before = await this.#editorText(spec.editor);
+    if (before === null) throw new NotFound(`入力欄が見つかりません: ${spec.editor}`);
+    if (norm(before) !== '') throw new Error('入力欄に書きかけがあるので送りません（人が書いている途中かもしれません）');
+    const { x, y } = await this.#center(spec.editor);
+    await this.#mouse(x, y);
+    const nl = spec.newline ?? { key: 'Enter' as Key, modifiers: 8 };
+    const lines = text.replace(/\r\n?/g, '\n').split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      if (i) await this.#press(nl.key, nl.modifiers ?? 0);
+      if (lines[i]) await this.cdp.send('Input.insertText', { text: lines[i] }, this.#sid);
+    }
+    const want = norm(text);
+    let typed = '';
+    for (const end = Date.now() + (spec.settleMs ?? 2000); ;) {
+      typed = norm(await this.#editorText(spec.editor));
+      if (typed === want || Date.now() >= end) break;
+      await sleep(100);
+    }
+    if (typed !== want) {
+      await this.#clearEditor(spec.editor).catch(() => {});
+      throw new Error(`入力欄の文が、送る文と合いません（入力欄を空に戻しました。送っていません）: 入れた ${want.length} 字・欄には ${typed.length} 字`);
+    }
+    if ('click' in spec.send) await this.#click(spec.send.click);
+    else await this.#press(spec.send.key, spec.send.modifiers ?? 0);
+    for (const end = Date.now() + (spec.emptyTimeoutMs ?? 5000); Date.now() < end; await sleep(150)) {
+      if (norm(await this.#editorText(spec.editor)) === '') return { ms: Date.now() - started };
+    }
+    await this.#clearEditor(spec.editor).catch(() => {});
+    throw new Error('送ったあと入力欄が空になりません（送れたか分かりません。入力欄を空に戻しました）');
+  }
+
   // ---- 巡回 ----
   #patrols = new Map<string, Patrol>();
 
@@ -942,6 +1016,16 @@ export class SessionWindow {
           L.setLatest(stream, seq);
           if ((L.maxSeq(stream) ?? -1) < seq) this.#patrolFor(extension)?.schedule();
         },
+      },
+      compose: async (text, spec) => {
+        try {
+          const r = await this.#compose(text, spec);
+          log({ type: 'compose', length: text.length, lines: text.split('\n').length, ms: r.ms });
+          return r;
+        } catch (e: any) {
+          log({ type: 'compose-failed', length: text.length, error: String(e?.message ?? e) });
+          throw e;
+        }
       },
       nudge: (stream) => {
         const p = this.#patrolFor(extension);
