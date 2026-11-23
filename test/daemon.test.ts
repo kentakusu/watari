@@ -195,11 +195,22 @@ test('台帳: 拡張が入れた発言で起こし（本文なし）、MCP で�
     onChange(e, w) {
       if (!e.value) return;
       w.ledger.put([{ stream: 'room-a', id: 'm-' + e.value, seq: 1, streamName: '試験の部屋', streamKind: 'group', author: 'u-tanaka', authorName: '田中',
-        at: new Date().toISOString(), text: e.value, toMe: e.value.includes('宛て') }]);
+        // 最初の 1 件は時刻を少し先にする（「有効にした時刻より前」で起こさないのではなく、「最初の取り込み」で起こさないことを見るため）
+        at: new Date(Date.now() + (e.value.includes('最初') ? 5000 : 0)).toISOString(), text: e.value, toMe: e.value.includes('宛て') }]);
     },
   };`);
+  // 窓は、前の試験の値（#latest）が残らないページに移してから拡張を入れる（並び順に頼らない）
+  await call(mcp, 'open_window', { url: siteUrl });
+  await waitFor(async () => { const x = await call(mcp, 'window_info'); return !x.isError && JSON.parse(textOf(x)).url === siteUrl && !!JSON.parse(textOf(x)).title; }, 15000, '空のページ');
   assert.ok(!(await call(mcp, 'install_extension', { path: p })).isError);
-  const before = notes.length;
+  // この所属で最初に台帳に入る発言は、宛てでも「最初の取り込み」とみなして起こさない
+  let before = notes.length;
+  await call(mcp, 'open_window', { url: `${siteUrl}?arrive=${encodeURIComponent('最初の取り込みの宛ての発言')}` });
+  await waitFor(async () => { const r = await call(mcp, 'ledger_list', { stream: 'room-a' }); return !r.isError && JSON.parse(textOf(r)).items.length === 1; }, 15000, '最初の 1 件が台帳に入る');
+  await new Promise((r) => setTimeout(r, 1000));
+  assert.ok(!notes.slice(before).some((n) => n.text.startsWith('trigger id=')), '最初の取り込みで起こした');
+  // 次の発言からは起こす
+  before = notes.length;
   await call(mcp, 'open_window', { url: `${siteUrl}?arrive=${encodeURIComponent('田中さん宛ての相談です')}` });
   await waitFor(() => notes.slice(before).some((n) => n.text.startsWith('trigger id=')), 15000, '起こす知らせ');
   const fire = notes.slice(before).find((n) => n.text.startsWith('trigger id='))!;
@@ -208,7 +219,8 @@ test('台帳: 拡張が入れた発言で起こし（本文なし）、MCP で�
   assert.ok(!fire.text.includes('相談'), '知らせに本文が入っている');
 
   const unread = JSON.parse(textOf(await call(mcp, 'ledger_unread', { for_me_only: true })));
-  assert.deepEqual(unread.items.map((x: any) => x.text), ['田中さん宛ての相談です']);
+  // 最初の取り込みの分も、起こさなかっただけで未読には出る
+  assert.deepEqual(unread.items.map((x: any) => x.text).sort(), ['最初の取り込みの宛ての発言', '田中さん宛ての相談です'].sort());
   const found = JSON.parse(textOf(await call(mcp, 'ledger_search', { q: '相談です' })));
   assert.equal(found.items.length, 1);
   let fires = JSON.parse(textOf(await call(mcp, 'ledger_fires')));
@@ -228,7 +240,7 @@ test('台帳: 拡張が入れた発言で起こし（本文なし）、MCP で�
   const noFire = await call(mcp, 'ledger_read', { trigger_id: 99999 });
   assert.equal(noFire.isError, true);
   assert.match(textOf(noFire), /その知らせはありません/);
-  assert.equal(JSON.parse(textOf(await call(mcp, 'ledger_unread', { for_me_only: true }))).items.length, 0);
+  assert.deepEqual(JSON.parse(textOf(await call(mcp, 'ledger_unread', { for_me_only: true }))).items.map((x: any) => x.text), ['最初の取り込みの宛ての発言']);
   fires = JSON.parse(textOf(await call(mcp, 'ledger_fires')));
   assert.equal(fires.stats.aiUnreadFires, 0);
   assert.ok(!(await call(mcp, 'remove_extension', { name: 'ledger-ext' })).isError);

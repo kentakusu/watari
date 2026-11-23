@@ -54,6 +54,21 @@ test('知らせの 1 行の頭と尾に、所属ごとの固定の文を付け�
   assert.ok(!sent[0].line.includes('\n'));
 });
 
+test('起こし直しても「有効にした時刻」を引き継ぎ、起こし直している間に来た発言でも起こす', async () => {
+  // 1 回目: 起こす条件を使い始める（有効にした時刻が台帳に残る）
+  put([item({ stream: 'w0', toMe: true })]);
+  await sleep(400);
+  const firstCount = sent.length;
+  // 常駐の起こし直しの代わり: 作り直す。そのあいだに来た発言（作り直す前の時刻）を、作り直したあとに入れる
+  E.stop();
+  const during = new Date().toISOString();
+  await sleep(50);
+  E = new TriggerEngine({ db: L.db, config: () => cfg, send: async (to, line) => { sent.push({ to, line }); }, log: () => {}, ownerRead: (s) => L.ownerReadSeq(s) });
+  put([item({ stream: 'w1', toMe: true, at: during })]);
+  await sleep(400);
+  assert.equal(sent.length, firstCount + 1, '起こし直している間の発言で起こさなかった（有効にした時刻が作り直した時刻になっている）');
+});
+
 test('どの条件にも当たらない発言では起こさない', async () => {
   put([item()]);
   await sleep(400);

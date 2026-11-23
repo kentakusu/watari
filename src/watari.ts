@@ -76,6 +76,8 @@ export type WindowApi = {
   };
   /** 拡張の小さな状態（所属と拡張ごと・常駐の再起動をまたいで残る・1MB まで） */
   state: ExtensionState;
+  /** この所属の設定（起こす条件・書き手の見分け・送る口）を読む。拡張に同じ値を二重に書かないため。読むたびに今の設定 */
+  config(): { triggers?: TriggerConfig; identity?: IdentityConfig; outbox?: OutboxConfig };
   /** 発言の台帳（所属ごと）。put で入れると、新しい発言だけが返り、起こす条件が判定される */
   ledger: {
     /** initial: 最初の一括取り込み（起こさない） */
@@ -341,6 +343,11 @@ export class Affiliation {
   #identityConfig: () => IdentityConfig | undefined;
   #identity?: Identity;
   /** 書き手の見分けを通してから台帳に入れる（設定で authorKind・mine を直す） */
+  /** 拡張が読む設定の写し（書き換えても本体の設定は変わらない） */
+  configView(): { triggers?: TriggerConfig; identity?: IdentityConfig; outbox?: OutboxConfig } {
+    return structuredClone({ triggers: this.#triggerConfig(), identity: this.#identityConfig(), outbox: this.#outboxConfig() });
+  }
+
   normalizeAuthors(items: LedgerItemInput[]): LedgerItemInput[] {
     this.#identity ??= new Identity(this.ledger().db);
     const r = this.#identity.apply(items, this.#identityConfig(), this.#triggerConfig()?.selfStreams ?? []);
@@ -820,9 +827,13 @@ export class SessionWindow {
         }
       },
       state: this.#aff.stateFor(ext),
+      config: () => this.#aff.configView(),
       ledger: {
         put: (items, opt = {}) => {
+          // この所属の最初の取り込み（台帳がまだ何も見ていない）は、拡張が印を付けなくても一括取り込みとみなして起こさない
+          const firstEver = this.#aff.ledger().neverSeen();
           const r = this.#aff.ledger().put(this.#aff.normalizeAuthors(items));
+          opt = { ...opt, initial: !!opt.initial || firstEver };
           this.#aff.triggers().consider(r.added, opt);
           // 送った本文が自分の発言として入ったかを確かめる
           for (const c of this.#aff.outbox().matchLedger([...r.added, ...r.updated])) log({ type: 'send-confirmed', id: c.id, stream: c.stream, by: c.confirmedBy });
