@@ -62,6 +62,19 @@ tool('press_key', 'キーを 1 回押す。modifiers は Alt=1, Ctrl=2, Meta=4, 
   { key: z.enum(['Enter', 'Backspace', 'Tab', 'Escape']), modifiers: z.number().int().min(0).max(15).optional() },
   async (a) => { await daemon.call('window.press', { session: mySession(), key: a.key, modifiers: a.modifiers ?? 0 }); return text('押しました'); });
 
+tool('scroll_until', '見えている分しか描かない一覧を、selector の要素が出るまで下へたどる。within には一覧の中にある要素を渡す（そのスクロールできる親を送る。省くとページ全体）。found・送った回数・末尾に着いたかを返す。人が「今触ってる」の間は待つ。',
+  {
+    selector: z.string(), within: z.string().optional(),
+    max: z.number().int().min(1).max(500).optional(), step_ratio: z.number().min(0.1).max(1).optional(),
+    wait_ms: z.number().int().min(0).max(10000).optional(), end_wait_ms: z.number().int().min(0).max(30000).optional(),
+    back_to_top: z.boolean().optional().describe('終わったら一覧を先頭に戻す'),
+  },
+  async (a) => {
+    const r = await daemon.call('window.scrollUntil', { session: mySession(), selector: a.selector, within: a.within, max: a.max, stepRatio: a.step_ratio, waitMs: a.wait_ms, endWaitMs: a.end_wait_ms });
+    if (a.back_to_top) await daemon.call('window.scrollToTop', { session: mySession(), within: a.within });
+    return text(JSON.stringify(r));
+  });
+
 tool('screenshot', '窓の見えている範囲を画像で返す。',
   {},
   async () => ({ content: [{ type: 'image' as const, data: (await daemon.call('window.screenshot', { session: mySession() })).png, mimeType: 'image/png' }] }));
@@ -110,9 +123,13 @@ tool('ledger_unread', '発言の台帳から、AI がまだ読んでいない発
   { for_me_only: z.boolean().optional(), limit: z.number().int().min(1).max(500).optional() },
   async (a) => text(JSON.stringify(await daemon.call('ledger.unread', { affiliation: affiliation(), forMeOnly: a.for_me_only, limit: a.limit }), null, 2)));
 
-tool('ledger_read', '発言を 1 件、前の数件（流れ）と返信先と一緒に読み、AI が読んだ印を付ける。contextGap が true なら、前の流れに抜けがある（台帳に無い発言がある）。',
-  { stream: z.string(), id: z.string(), context: z.number().int().min(0).max(50).optional().describe('前の何件まで（既定 5）') },
-  async (a) => text(JSON.stringify(await daemon.call('ledger.read', { affiliation: affiliation(), stream: a.stream, id: a.id, context: a.context }), null, 2)));
+tool('ledger_read', '発言を、前の数件（流れ）と返信先と一緒に読み、AI が読んだ印を付ける。stream と id で 1 件、または trigger_id（知らせの 1 行の id）で、その知らせに入った発言をまとめて読む。contextGap が true なら、前の流れに抜けがある（台帳に無い発言がある）。trigger_id のとき missing は台帳から消えていた発言。',
+  {
+    stream: z.string().optional(), id: z.string().optional(),
+    trigger_id: z.number().int().optional().describe('知らせの番号（trigger id=… の数）'),
+    context: z.number().int().min(0).max(50).optional().describe('前の何件まで（既定は 1 件のとき 5・trigger_id のとき 3）'),
+  },
+  async (a) => text(JSON.stringify(await daemon.call('ledger.read', { affiliation: affiliation(), stream: a.stream, id: a.id, triggerId: a.trigger_id, context: a.context }), null, 2)));
 
 tool('ledger_search', '発言の台帳を全文で探す（本文・部屋の名前・書き手の名前の部分一致・新しい順）。読んだ印は付けない。',
   { q: z.string(), stream: z.string().optional(), limit: z.number().int().min(1).max(500).optional() },

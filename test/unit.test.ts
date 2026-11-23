@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, existsSync, mkdirSync, writeFileSync, readdirSync } from 'node:fs';
 import { pruneCaptures } from '../src/capture.ts';
 import { perAffiliation } from '../src/home.ts';
-import { decodeMqtt, encodeMqttPublish } from '../src/mqtt.ts';
+import { decodeMqtt, encodeMqttPublish, MqttJoiner } from '../src/mqtt.ts';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pathForDaemon } from '../src/paths.ts';
@@ -91,6 +91,46 @@ test('MQTT: 長い中身（長さが 2 バイト以上）・QoS 1 の番号・�
   // 途中で切れたもの
   const cut = encodeMqttPublish('room', 'abcdef').subarray(0, 6);
   assert.deepEqual(decodeMqtt(cut).map((p) => [p.typeName, p.truncated]), [['PUBLISH', true]]);
+});
+
+// 実際に起きた形: フレームが前のパケットの途中から始まり、topic の長さとして大きな数（23673）を読んでしまう。
+// QoS 1（0x32）なので、直す前はそのあとパケット番号を範囲の外で読んで投げていた（直す前のコードで再現を確かめた。QoS 0 だと投げない）
+const brokenFrame = Buffer.from([0x32, 0x05, 0x5c, 0x79, 0x61, 0x62, 0x63]);
+
+test('MQTT: 中の長さがパケットを超えていても投げず、malformed を付けてそこで止める', () => {
+  let ps: ReturnType<typeof decodeMqtt> = [];
+  assert.doesNotThrow(() => { ps = decodeMqtt(brokenFrame); });
+  assert.equal(ps.length, 1);
+  assert.match(ps[0].malformed ?? '', /topic の長さ（23673）がパケットを超えている/);
+  // 種類 0（パケットの頭でないところ）も投げない
+  assert.match(decodeMqtt(Buffer.from([0x00, 0x01, 0x02]))[0].malformed ?? '', /種類 0/);
+  // ほかの途中で切れる形も投げない（qos の番号・版 5 の properties）
+  assert.doesNotThrow(() => decodeMqtt(Buffer.from([0x32, 0x03, 0x00, 0x01, 0x61])));
+  assert.doesNotThrow(() => decodeMqtt(Buffer.from([0x30, 0x04, 0x00, 0x01, 0x61, 0x7f]), { version: 5 }));
+});
+
+test('MQTT: フレームをまたぐパケットを、接続ごとにつなぎ直して開く', () => {
+  const big = encodeMqttPublish('room/9', JSON.stringify({ text: 'い'.repeat(200) }));
+  const second = encodeMqttPublish('room/9', '{"text":"次"}');
+  const frame1 = big.subarray(0, 100);
+  const frame2 = Buffer.concat([big.subarray(100), second]);
+  const J = new MqttJoiner();
+  assert.deepEqual(J.feed('conn-1', frame1.toString('base64')), [], '切れたものを、つながる前に返している');
+  const got = J.feed('conn-1', frame2.toString('base64'));
+  assert.deepEqual(got.map((p) => (p.payloadJson as any).text), ['い'.repeat(200), '次']);
+  // 別の接続の残りとは混ざらない
+  assert.deepEqual(J.feed('conn-2', frame1.toString('base64')), []);
+  assert.equal(J.feed('conn-1', second.toString('base64'))[0].payloadText, '{"text":"次"}');
+  // つながずに後半だけを開いても投げない
+  assert.doesNotThrow(() => decodeMqtt(frame2));
+});
+
+test('MQTT: つなぎ直しの残りが上限を超えたら捨てて数える（黙って膨らませない）', () => {
+  const J = new MqttJoiner(10);
+  const big = encodeMqttPublish('t', 'x'.repeat(100));
+  const ps = J.feed('c', big.subarray(0, 50));
+  assert.equal(J.dropped, 1);
+  assert.equal(ps[0].truncated, true, '捨てたものは truncated として返す');
 });
 
 test('通知のコマンドが失敗したら、黙らずに失敗を返す', async () => {

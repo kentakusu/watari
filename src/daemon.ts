@@ -182,6 +182,11 @@ export async function startDaemon(opts: DaemonOptions) {
     'window.type': async (p) => { await win(p.session).act.type(p.selector, p.text); return { ok: true }; },
     'window.press': async (p) => { await win(p.session).act.press(p.key, p.modifiers ?? 0); return { ok: true }; },
     'window.screenshot': async (p) => ({ png: await win(p.session).act.screenshot() }),
+    'window.scrollUntil': async (p) => {
+      if (typeof p.selector !== 'string' || !p.selector) throw new Error('selector が要ります');
+      return win(p.session).act.scrollUntil(p.selector, { within: p.within, max: p.max, stepRatio: p.stepRatio, waitMs: p.waitMs, endWaitMs: p.endWaitMs });
+    },
+    'window.scrollToTop': async (p) => { await win(p.session).act.scrollToTop(p.within); return { ok: true }; },
     'window.outline': async (p) => win(p.session).act.outline(p.selector ?? 'body', p.depth ?? 6, p.maxNodes ?? 400, p.textChars ?? 12),
     'window.touch': async (p) => { win(p.session).setTouching(!!p.on); return { ok: true }; },
     'window.focus': async (p) => { await win(p.session).focus(); return { ok: true }; },
@@ -193,7 +198,23 @@ export async function startDaemon(opts: DaemonOptions) {
     },
     'ledger.read': async (p) => {
       const name = affName(p.affiliation);
-      if (typeof p.stream !== 'string' || typeof p.id !== 'string') throw new Error('stream と id が要ります');
+      if (p.triggerId !== undefined) {
+        // 知らせの番号だけで、その知らせに入った発言をまとめて読む（知らせの 1 行には trigger id しか無いため）
+        const L = ledgerOf(name);
+        let fire: any;
+        try { fire = L.db.prepare('SELECT id, at, stream, stream_name, rules, kind, items_json FROM fires WHERE id = ?').get(Number(p.triggerId)); }
+        catch { fire = undefined; }
+        if (!fire) throw new Error(`その知らせはありません: trigger id=${p.triggerId}`);
+        const items = JSON.parse(fire.items_json) as Array<{ stream: string; id: string }>;
+        const reads: unknown[] = [];
+        const missing: Array<{ stream: string; id: string }> = [];
+        for (const it of items) {
+          const r = L.read(it.stream, it.id, p.context ?? 3);
+          if (r) reads.push(r); else missing.push(it); // 保持の日数で消えたもの
+        }
+        return { trigger: { id: fire.id, at: fire.at, stream: fire.stream, streamName: fire.stream_name ?? undefined, rules: fire.rules ? fire.rules.split(',') : [], kind: fire.kind }, reads, missing };
+      }
+      if (typeof p.stream !== 'string' || typeof p.id !== 'string') throw new Error('stream と id か、trigger_id が要ります');
       const r = ledgerOf(name).read(p.stream, p.id, p.context ?? 5);
       if (!r) throw new Error(`台帳にその発言はありません: ${p.stream} / ${p.id}`);
       return r;
@@ -328,6 +349,8 @@ export async function startDaemon(opts: DaemonOptions) {
 
   async function stop() {
     clearInterval(heartbeat);
+    // 止める直前の窓の URL を書き残す（30 秒ごとの書き残しの間に移った分を落とさない）
+    try { saveWindows(); } catch (e: any) { process.stderr.write(`渡: 窓を書き残せませんでした: ${e?.message ?? e}\n`); }
     for (const a of affiliations.values()) await a.stop().catch(() => {});
     for (const l of standaloneLedgers.values()) l.close();
     standaloneLedgers.clear();
