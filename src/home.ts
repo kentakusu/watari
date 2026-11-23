@@ -2,6 +2,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import type { TriggerConfig } from './triggers.ts';
+import type { OutboxConfig } from './outbox.ts';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -26,6 +27,8 @@ export type Config = {
   ledgerRetentionDays?: number | Record<string, number>;
   /** 所属ごとの「起こす条件」（{ "所属": {...}, "*": {...} }）。書いていない所属では起こさない */
   triggers?: Record<string, TriggerConfig>;
+  /** 所属ごとの送る口（{ "所属": {...}, "*": {...} }）。書いていない所属では送れない */
+  outbox?: Record<string, OutboxConfig>;
   headless?: boolean;
 };
 

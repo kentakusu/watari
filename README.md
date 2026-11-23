@@ -40,7 +40,7 @@ claude mcp add watari -- node <このリポジトリ>/src/mcp.ts --home D:\watar
 # 紡の外なら: ... --session 所属/名前
 ```
 
-MCP の道具: `open_window`・`window_info`・`read`・`click`・`type_text`・`press_key`・`screenshot`・`set_label`・`list_extensions`・`install_extension`・`remove_extension`・`search_captures`・`recent_log`・`ledger_unread`・`ledger_read`・`ledger_search`・`ledger_fires`・`collect`・`dom_outline`・`watari_status`。自分のセッションの窓しか操れません。
+MCP の道具: `open_window`・`window_info`・`read`・`click`・`type_text`・`press_key`・`screenshot`・`set_label`・`list_extensions`・`install_extension`・`remove_extension`・`search_captures`・`recent_log`・`ledger_unread`・`ledger_read`・`ledger_search`・`ledger_fires`・`send_message`・`outbox_list`・`collect`・`dom_outline`・`watari_status`。自分のセッションの窓しか操れません。
 
 ### 置き場（`--home`・既定は環境変数 `WATARI_HOME`、無ければ `~/.watari`）
 
@@ -168,6 +168,27 @@ w.ledger.setOwnerRead('room-123', 455);                  // 持ち主がどこ�
 - 設定を書き換えると、常駐を起こし直さなくても次の発言から効きます。台帳を残す日数は `ledgerRetentionDays`（書き方は `captureRetentionDays` と同じ・既定は期限なし）。
 
 MCP: `ledger_unread`（AI がまだ読んでいない発言・`for_me_only` で宛てだけ）・`ledger_read`（前の流れと返信先と一緒に読み、読んだ印を付ける。流れに抜けがあれば `contextGap`）・`ledger_search`（全文）・`ledger_fires`（最近の知らせと、届かなかった数・AI がまだ読んでいない知らせの数と最古の時刻）。
+
+### 送る口（関所つき）
+
+Claude が MCP の `send_message`（部屋と本文）で預けると、拡張の `onSend` が画面でその本文をそのまま送り、本体が台帳で確かめます。
+
+```ts
+async onSend(req, w) {            // req = { id, stream, text }
+  // req.text を変えずに、画面で req.stream の部屋に送る。送れなければ投げる
+  // 送ったあと、画面や通信に出た自分の発言を w.ledger.put で台帳に入れる（mine: true）
+},
+```
+
+```json
+{ "outbox": { "所属": { "allowedStreams": ["持ち主と Claude の 1:1"], "allowedStreamKinds": ["direct"], "confirmSeconds": 60, "repeatGuardMinutes": 10 } } }
+```
+
+- 設定（`outbox`）で許した部屋（`allowedStreams`）か、部屋の種類（`allowedStreamKinds`・台帳の `streamKind`）にしか送りません。設定が無ければ送る口は閉じています。
+- 1 つの預けは 1 回しか送りません。同じ部屋に同じ本文を `repeatGuardMinutes` 以内に預かっていれば断ります（「確かめられない」のあとに送り直して二重に届くのを防ぐ。本当に送り直すなら `allow_repeat`）。
+- 結果は 3 つです: `confirmed`（台帳に自分の発言として本文が完全一致で入った）／`unconfirmed`（`confirmSeconds` 待っても入らなかった＝送れていても確かめられていない。あとで入れば `confirmed` に変わる）／`failed`（`onSend` が投げた）。
+- `onSend` が動いている間は、同じ窓の拡張のほかの操作は待ちます（部屋を切り替えて書きかけが消えないように）。人が「今触ってる」を押している間は、`onSend` の中の `click`・`type` も待ちます。
+- 預けと結果は台帳（`ledger/<所属>.db`）と記録に残ります。MCP の `outbox_list` で最近の預けと状態の数が見られます。
 
 ### 見えているかを確かめる
 
