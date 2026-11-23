@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, existsSync, mkdirSync, writeFileSync, readdirSync } from 'node:fs';
 import { pruneCaptures } from '../src/capture.ts';
+import { perAffiliation } from '../src/home.ts';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pathForDaemon } from '../src/paths.ts';
@@ -51,6 +52,15 @@ test('通信の記録は保持の日数より古い日のファイルだけを�
     assert.deepEqual(pruneCaptures(home, 'a', 2, now).sort(), ['2026-11-20.jsonl', '2026-11-21.jsonl']);
     assert.deepEqual(readdirSync(dir).sort(), ['2026-11-22.jsonl', '2026-11-23.jsonl', 'メモ.txt']);
   } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('所属ごとの設定: 数ならどの所属にも、表ならその所属 → "*" の順、無ければ期限なし', () => {
+  assert.equal(perAffiliation(30, 'reatex'), 30);
+  assert.equal(perAffiliation({ reatex: 30 }, 'reatex'), 30);
+  assert.equal(perAffiliation({ reatex: 30 }, 'kenta'), undefined, 'reatex の日数が kenta にも効いている');
+  assert.equal(perAffiliation({ reatex: 30, '*': 7 }, 'kenta'), 7);
+  assert.equal(perAffiliation({ reatex: 0, '*': 7 }, 'reatex'), 0, '所属に 0 と書いたら "*" より優先する（期限なし）');
+  assert.equal(perAffiliation(undefined, 'reatex'), undefined);
 });
 
 test('通知のコマンドが失敗したら、黙らずに失敗を返す', async () => {

@@ -8,7 +8,7 @@ import { isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Affiliation, type Extension } from './watari.ts';
 import { configuredNotifier } from './notify.ts';
-import { ensureToken, restrictHome, readConfig, readDaemonInfo, readExtensions, readWindows, writeDaemonInfo, writeExtensions, writeWindows, type ExtensionRecord, type WindowRecord } from './home.ts';
+import { ensureToken, restrictHome, perAffiliation, readConfig, readDaemonInfo, readExtensions, readWindows, writeDaemonInfo, writeExtensions, writeWindows, type ExtensionRecord, type WindowRecord } from './home.ts';
 
 export type DaemonOptions = { home: string; port?: number; headless?: boolean; missingGraceMs?: number; notifyOverride?: (session: string, text: string) => Promise<void> };
 
@@ -229,9 +229,10 @@ export async function startDaemon(opts: DaemonOptions) {
   let lastPrune = 0;
   const prune = () => {
     lastPrune = Date.now();
-    const days = readConfig(home).captureRetentionDays; // 設定を書き換えたら、常駐を起こし直さなくても次から効く
+    const setting = readConfig(home).captureRetentionDays; // 設定を書き換えたら、常駐を起こし直さなくても次から効く
     for (const a of new Set([...affiliations.keys(), ...listCaptureAffiliations(home)])) {
       try {
+        const days = perAffiliation(setting, a); // 所属ごと（書いていない所属は期限なし）
         const gone = pruneCaptures(home, a, days);
         if (gone.length) affiliations.get(a)?.log({ type: 'captures-pruned', days, files: gone });
       } catch (e: any) { process.stderr.write(`渡: 古い通信の記録を消せませんでした（${a}）: ${e?.message ?? e}\n`); }

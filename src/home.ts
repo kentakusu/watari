@@ -16,10 +16,21 @@ export type Config = {
   missingGraceMs?: number;
   /** 窓の画面も通信もこれだけ動かなければ「古い（stale）」と出す。既定 15 分 */
   staleMs?: number;
-  /** 通信の記録を何日残すか（今日を 1 日目と数える）。書かなければ期限なし */
-  captureRetentionDays?: number;
+  /**
+   * 通信の記録を何日残すか（今日を 1 日目と数える）。書かなければ期限なし。
+   * 所属ごとに変えるときは { "所属": 日数, "*": 日数 }（書いていない所属は期限なし）
+   */
+  captureRetentionDays?: number | Record<string, number>;
   headless?: boolean;
 };
+
+/** 所属ごとの値を取り出す（数そのものなら全所属、表なら その所属 → "*" の順。無ければ undefined） */
+export function perAffiliation<T>(value: T | Record<string, T> | undefined, affiliation: string): T | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'object' || Array.isArray(value)) return value as T;
+  const table = value as Record<string, T>;
+  return affiliation in table ? table[affiliation] : table['*'];
+}
 
 export type ExtensionRecord = { affiliation: string; name: string; path: string; installedBy: string; installedAt: string };
 
