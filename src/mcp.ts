@@ -46,6 +46,10 @@ tool('read', 'セレクタに当たる最初の要素のテキストを返す。
   { selector: z.string() },
   async (a) => text(JSON.stringify(await daemon.call('window.read', { session: mySession(), selector: a.selector }))));
 
+tool('collect', '一覧を項目ごとのオブジェクトにして読む。fields の値は "@属性"（項目の属性）・"セレクタ"（項目の中のテキスト）・"セレクタ@属性"・"."（項目のテキスト）。',
+  { selector: z.string().describe('項目のセレクタ'), fields: z.record(z.string(), z.string()) },
+  async (a) => text(JSON.stringify(await daemon.call('window.collect', { session: mySession(), selector: a.selector, fields: a.fields }), null, 2)));
+
 tool('click', 'セレクタに当たる要素の真ん中をクリックする（人のクリックと同じ扱い）。人が「今触ってる」の間は待つ。',
   { selector: z.string() },
   async (a) => { await daemon.call('window.click', { session: mySession(), selector: a.selector }); return text('押しました'); });

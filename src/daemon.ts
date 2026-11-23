@@ -132,6 +132,10 @@ export async function startDaemon(opts: DaemonOptions) {
     },
     'window.info': async (p) => win(p.session).act.info(p.maxText ?? 4000),
     'window.read': async (p) => ({ text: await win(p.session).act.read(p.selector) }),
+    'window.collect': async (p) => {
+      if (!p.fields || typeof p.fields !== 'object') throw new Error('fields が要ります（例: {"name": ".title", "id": "@data-id"}）');
+      return { items: await win(p.session).act.collect(p.selector, p.fields) };
+    },
     'window.click': async (p) => { await win(p.session).act.click(p.selector); return { ok: true }; },
     'window.type': async (p) => { await win(p.session).act.type(p.selector, p.text); return { ok: true }; },
     'window.press': async (p) => { await win(p.session).act.press(p.key, p.modifiers ?? 0); return { ok: true }; },

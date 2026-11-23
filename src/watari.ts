@@ -22,6 +22,8 @@ export type WindowApi = {
   label: string;
   /** 最初に当たる要素のテキスト。無ければ null */
   read(selector: string): Promise<string | null>;
+  /** 一覧を項目ごとのオブジェクトで読む（fields: '@属性' / 'セレクタ' / 'セレクタ@属性' / '.'） */
+  collect(itemSelector: string, fields: Record<string, string>): Promise<Array<Record<string, string | null>>>;
   /** 当たる要素すべてのテキスト（画面に描かれているものだけ） */
   readAll(selector: string): Promise<string[]>;
   /** 当たる要素すべての属性 */
@@ -365,11 +367,34 @@ export class SessionWindow {
     await this.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code: k.code, windowsVirtualKeyCode: k.keyCode, modifiers }, this.#sid);
   }
 
+  /**
+   * 一覧を、項目ごとのオブジェクトにして読む。fields の値は
+   *   '@属性'        … 項目そのものの属性
+   *   'セレクタ'      … 項目の中の要素のテキスト（無ければ null）
+   *   'セレクタ@属性' … 項目の中の要素の属性
+   *   '.'            … 項目そのもののテキスト
+   */
+  #collect(itemSelector: string, fields: Record<string, string>): Promise<Array<Record<string, string | null>>> {
+    return this.#eval(`(() => {
+      const fields = ${JSON.stringify(fields)};
+      const get = (item, spec) => {
+        const at = spec.lastIndexOf('@');
+        const sel = at >= 0 ? spec.slice(0, at).trim() : spec.trim();
+        const attr = at >= 0 ? spec.slice(at + 1) : '';
+        const el = sel === '' || sel === '.' ? item : item.querySelector(sel);
+        if (!el) return null;
+        return attr ? el.getAttribute(attr) : (el.textContent || '').trim();
+      };
+      return [...document.querySelectorAll(${JSON.stringify(itemSelector)})].map((item) => Object.fromEntries(Object.entries(fields).map(([k, s]) => [k, get(item, s)])));
+    })()`);
+  }
+
   #logAct(by: string, rec: object): void { this.#aff.log({ session: this.session, by, ...rec }); }
 
   /** 外（MCP・トレイ）から使う道具。拡張の動きと順番に並ぶ。 */
   readonly act = {
     read: (selector: string) => this.#serial(() => this.#read(selector)),
+    collect: (itemSelector: string, fields: Record<string, string>) => this.#serial(() => this.#collect(itemSelector, fields)),
     click: (selector: string) => this.#serial(async () => { await this.#click(selector); this.#logAct('outside', { type: 'click', selector }); }),
     type: (selector: string, text: string) => this.#serial(async () => { await this.#type(selector, text); this.#logAct('outside', { type: 'type', selector, length: text.length }); }),
     press: (key: Key, modifiers = 0) => this.#serial(async () => { await this.#press(key, modifiers); this.#logAct('outside', { type: 'press', key, modifiers }); }),
@@ -411,6 +436,7 @@ export class SessionWindow {
       session: this.session,
       label: this.#label,
       read: (selector) => this.#read(selector),
+      collect: (itemSelector, fields) => this.#collect(itemSelector, fields),
       readAll: (selector) => this.#eval(`[...document.querySelectorAll(${JSON.stringify(selector)})].map((el) => (el.textContent || '').trim())`),
       attrAll: (selector, name) => this.#eval(`[...document.querySelectorAll(${JSON.stringify(selector)})].map((el) => el.getAttribute(${JSON.stringify(name)}))`),
       waitFor: async (selector, ms = 10000) => {

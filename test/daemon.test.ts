@@ -74,7 +74,7 @@ test('口: 合言葉なしでは断る・生死の確認だけは通す', async 
 
 test('MCP の道具がそろっている', async () => {
   const names = (await mcp.listTools()).tools.map((t) => t.name).sort();
-  for (const n of ['open_window', 'window_info', 'read', 'click', 'type_text', 'press_key', 'screenshot', 'dom_outline', 'set_label', 'list_extensions', 'install_extension', 'remove_extension', 'search_captures', 'recent_log', 'watari_status']) {
+  for (const n of ['open_window', 'window_info', 'read', 'collect', 'click', 'type_text', 'press_key', 'screenshot', 'dom_outline', 'set_label', 'list_extensions', 'install_extension', 'remove_extension', 'search_captures', 'recent_log', 'watari_status']) {
     assert.ok(names.includes(n), `${n} がありません: ${names.join(',')}`);
   }
 });
@@ -100,6 +100,16 @@ test('画面の作りを木で読める（テキストは短く切る）', async
   assert.equal(o.nodes.text, '受信…(3)');
   assert.deepEqual(o.nodes.children.map((c: any) => c.id), ['badge']);
   assert.equal(JSON.parse(textOf(await call(mcp, 'dom_outline', { selector: '#nai' }))), null);
+});
+
+test('一覧を項目ごとのオブジェクトで読める', async () => {
+  const r = JSON.parse(textOf(await call(mcp, 'collect', { selector: 'button', fields: { label: '.', type: '@type', none: '.nai', idOfSelf: '@id' } })));
+  assert.deepEqual(r.items, [
+    { label: '送る', type: 'button', none: null, idOfSelf: 'send' },
+    { label: '既読にする', type: 'button', none: null, idOfSelf: 'mark-read' },
+  ]);
+  const h = JSON.parse(textOf(await call(mcp, 'collect', { selector: 'h1', fields: { badge: '#badge', badgeId: '#badge@id' } })));
+  assert.deepEqual(h.items, [{ badge: '0', badgeId: 'badge' }]);
 });
 
 test('無い要素を押すと失敗として返る（黙って成功しない）', async () => {
