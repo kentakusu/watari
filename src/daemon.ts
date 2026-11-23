@@ -80,6 +80,7 @@ export async function startDaemon(opts: DaemonOptions) {
       name, home, notifier, headless: opts.headless ?? (readDisplay(home)[name] === 'hidden' || !!cfg.headless), missingGraceMs: opts.missingGraceMs ?? cfg.missingGraceMs,
       // 毎回読む（設定の triggers を書き換えれば、常駐を起こし直さなくても次の発言から効く）
       triggerConfig: () => triggerConfigOf(name),
+      identityConfig: () => { const i = readConfig(home).identity; return i?.[name] ?? i?.['*']; },
       outboxConfig: () => { const o = readConfig(home).outbox; return o?.[name] ?? o?.['*']; },
       // keepOpen の窓は、閉じるボタンを押されても閉じずに最小化して裏で動かす
       closeToBackground: (session) => keepOpenList(readConfig(home).keepOpen).includes(session),
