@@ -61,8 +61,8 @@ C: が小さい機では D: を指してください。
 ```json
 {
   "notify": {
-    "kenta": ["tsumugi", "届ける", "{name}"],
-    "reatex": ["wsl.exe", "-d", "Reatex", "-e", "bash", "-lc", "exec tsumugi 届ける \"$0\"", "{name}"]
+    "team-b": ["tsumugi", "届ける", "{name}"],
+    "team-a": ["wsl.exe", "-d", "Ubuntu", "-e", "bash", "-lc", "exec tsumugi 届ける \"$0\"", "{name}"]
   }
 }
 ```
@@ -111,7 +111,7 @@ async onCapture(c, w) { /* c.body を読み解いて w.notify(...) */ },
 - WebSocket の上の MQTT は `w.decode.mqtt(c.body, { join: c.connection })` で開けます。1 つのフレームの中の複数のパケットを順に開き、PUBLISH は `topic` と中身（`payload`（base64）・読めれば `payloadText`・JSON なら `payloadJson`）を返します。版 5 は `version: 5`。
   - `join` に記録の `connection`（接続の id）を渡すと、前のフレームで切れた残りとつなぎ直します（渡さなければ、切れたものは `truncated: true`）。
   - どんな入力でも投げません。中の長さが合わない（フレームがパケットの途中から始まっている等）ときは `malformed` に理由を入れて、そこで止めます。
-- 残す日数は `config.json` の `captureRetentionDays`（今日を 1 日目と数える）。**書かなければ期限なし**です。数を書くと全部の所属に、`{ "reatex": 30, "*": 7 }` のように書くと所属ごとに効きます（書いていない所属は `"*"`、それも無ければ期限なし）。書き換えると、常駐を起こし直さなくても 1 時間以内に効きます。
+- 残す日数は `config.json` の `captureRetentionDays`（今日を 1 日目と数える）。**書かなければ期限なし**です。数を書くと全部の所属に、`{ "team-a": 30, "*": 7 }` のように書くと所属ごとに効きます（書いていない所属は `"*"`、それも無ければ期限なし）。書き換えると、常駐を起こし直さなくても 1 時間以内に効きます。
 
 ### 拡張の状態
 

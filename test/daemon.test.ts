@@ -200,7 +200,7 @@ test('台帳: 拡張が入れた発言で起こし（本文なし）、MCP で�
   };`);
   assert.ok(!(await call(mcp, 'install_extension', { path: p })).isError);
   const before = notes.length;
-  await call(mcp, 'open_window', { url: `${siteUrl}?arrive=${encodeURIComponent('鈴木さん宛ての相談です')}` });
+  await call(mcp, 'open_window', { url: `${siteUrl}?arrive=${encodeURIComponent('田中さん宛ての相談です')}` });
   await waitFor(() => notes.slice(before).some((n) => n.text.startsWith('trigger id=')), 15000, '起こす知らせ');
   const fire = notes.slice(before).find((n) => n.text.startsWith('trigger id='))!;
   assert.equal(fire.session, 'test/mcp');
@@ -208,7 +208,7 @@ test('台帳: 拡張が入れた発言で起こし（本文なし）、MCP で�
   assert.ok(!fire.text.includes('相談'), '知らせに本文が入っている');
 
   const unread = JSON.parse(textOf(await call(mcp, 'ledger_unread', { for_me_only: true })));
-  assert.deepEqual(unread.items.map((x: any) => x.text), ['鈴木さん宛ての相談です']);
+  assert.deepEqual(unread.items.map((x: any) => x.text), ['田中さん宛ての相談です']);
   const found = JSON.parse(textOf(await call(mcp, 'ledger_search', { q: '相談です' })));
   assert.equal(found.items.length, 1);
   let fires = JSON.parse(textOf(await call(mcp, 'ledger_fires')));
@@ -223,7 +223,7 @@ test('台帳: 拡張が入れた発言で起こし（本文なし）、MCP で�
   assert.deepEqual(byTrigger.missing, []);
   assert.equal(byTrigger.reads.length, 1);
   const read = byTrigger.reads[0];
-  assert.equal(read.item.text, '鈴木さん宛ての相談です');
+  assert.equal(read.item.text, '田中さん宛ての相談です');
   assert.ok(read.item.aiReadAt);
   const noFire = await call(mcp, 'ledger_read', { trigger_id: 99999 });
   assert.equal(noFire.isError, true);
@@ -257,7 +257,13 @@ test('送る口: 画面で送り、台帳で確かめる（確かめ済み・確
   };`);
   assert.ok(!(await call(mcp, 'install_extension', { path: p })).isError);
   await call(mcp, 'open_window', { url: siteUrl });
-  await waitFor(async () => !(await call(mcp, 'window_info')).isError, 15000, '窓の見張りが立つ');
+  // 前の試験で別の URL にいたので、古いページの見張りがまだ生きている。新しいページに移って題が付くまで待つ
+  await waitFor(async () => {
+    const x = await call(mcp, 'window_info');
+    if (x.isError) return false;
+    const i = JSON.parse(textOf(x));
+    return i.url === siteUrl && !!i.title;
+  }, 15000, '新しいページに移って題が付く');
   const logCount = async () => JSON.parse(textOf(await call(mcp, 'collect', { selector: '#log li', fields: { t: '.' } }))).items.length;
 
   const ok = JSON.parse(textOf(await call(mcp, 'send_message', { stream: 'room-a', text: '送る口の試し' })));
