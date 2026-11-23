@@ -32,6 +32,8 @@ export type Capture = {
   source?: 'page' | 'shared_worker' | 'service_worker';
   /** source がワーカーのとき、そのワーカーの URL */
   workerUrl?: string;
+  /** WebSocket のとき、どの接続のフレームか（同じ URL に複数つながっていても分かれる）。MQTT をつなぎ直す鍵に使う */
+  connection?: string;
   url: string;
   method?: string;
   status?: number;
@@ -172,7 +174,7 @@ export class NetworkTap {
       if (!rule) return;
       const data = String(p.response?.payloadData ?? '');
       // CDP はバイナリのフレーム（opcode 2）を base64 で渡してくる
-      this.onCapture(rule, { kind: 'ws', url, dir, ...this.#payload(rule, data, p.response?.opcode === 2) });
+      this.onCapture(rule, { kind: 'ws', url, dir, connection: p.requestId, ...this.#payload(rule, data, p.response?.opcode === 2) });
     };
     on('Network.webSocketFrameReceived', frame('in'));
     on('Network.webSocketFrameSent', frame('out'));

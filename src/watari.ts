@@ -6,7 +6,7 @@ import { BINDING, WORLD, pageScript, reconfigureExpression, siteMatches, type In
 import { openState, type ExtensionState } from './state.ts';
 import { Ledger, type LedgerItemInput, type PutResult } from './ledger.ts';
 import { TriggerEngine, type TriggerConfig } from './triggers.ts';
-import { decodeMqtt, type MqttPacket } from './mqtt.ts';
+import { decodeMqtt, MqttJoiner, type MqttPacket } from './mqtt.ts';
 import { Outbox, type OutboxConfig, type OutboxEntry } from './outbox.ts';
 import { NetworkTap, appendCapture, type Capture, type CaptureRule, type CaptureSpec } from './capture.ts';
 
@@ -45,7 +45,11 @@ export type WindowApi = {
   /** よくある形を開く道具 */
   decode: {
     /** MQTT のパケット（base64）を開く。WebSocket の上の MQTT を読むため */
-    mqtt(base64: string, opt?: { version?: 4 | 5 }): MqttPacket[];
+    /**
+     * join に接続の鍵（記録の connection）を渡すと、前のフレームで切れた残りとつなぎ直して開く。
+     * どんな入力でも投げない（切れたものは truncated、形が崩れたものは malformed）
+     */
+    mqtt(base64: string, opt?: { version?: 4 | 5; join?: string }): MqttPacket[];
   };
   /** 拡張の小さな状態（所属と拡張ごと・常駐の再起動をまたいで残る・1MB まで） */
   state: ExtensionState;
@@ -121,6 +125,9 @@ export class Affiliation {
   }
 
   get extensions(): readonly Extension[] { return this.#extensions; }
+
+  /** フレームをまたぐ MQTT のパケットをつなぎ直すための残り（接続ごと） */
+  readonly mqttJoiner = new MqttJoiner();
 
   #states = new Map<string, ExtensionState>();
   /** 拡張の状態。所属の中で拡張ごとに 1 つ（窓が違っても同じもの） */
@@ -638,7 +645,7 @@ export class SessionWindow {
         },
         setOwnerRead: (stream, seq, at) => this.#aff.ledger().setOwnerRead(stream, seq, at),
       },
-      decode: { mqtt: (b64, opt) => decodeMqtt(b64, opt) },
+      decode: { mqtt: (b64, opt = {}) => (opt.join ? this.#aff.mqttJoiner.feed(opt.join, b64, opt) : decodeMqtt(b64, opt)) },
       report: (r) => {
         const gaps = Math.max(0, Math.floor(r.gaps ?? 0));
         this.gaps += gaps;

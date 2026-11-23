@@ -22,6 +22,8 @@ export type MqttPacket = {
   payloadJson?: unknown;
   /** パケットがフレームの途中で切れている */
   truncated?: boolean;
+  /** パケットの中の長さが合わない（理由）。そこで読むのをやめている */
+  malformed?: string;
 };
 
 function readVarInt(b: Buffer, at: number): { value: number; size: number } | null {
@@ -38,18 +40,25 @@ function readVarInt(b: Buffer, at: number): { value: number; size: number } | nu
 
 const utf8 = new TextDecoder('utf-8', { fatal: true });
 
-/** base64 か Buffer で受け取り、入っているパケットを全部返す */
-export function decodeMqtt(input: string | Uint8Array, opt: { version?: 4 | 5 } = {}): MqttPacket[] {
-  const b = typeof input === 'string' ? Buffer.from(input, 'base64') : Buffer.from(input);
-  const version = opt.version ?? 4;
+/**
+ * 中身を開く芯。どんな入力でも投げない。
+ * - 最後のパケットがフレームの途中で切れていれば、その残りのバイトを rest に返す（次のフレームにつなぐため）
+ * - パケットの中の長さが合わない（フレームが前のパケットの途中から始まっている等）ときは malformed を立ててそこで止める
+ */
+function decodeCore(b: Buffer, version: 4 | 5): { packets: MqttPacket[]; rest: Buffer } {
   const out: MqttPacket[] = [];
   let at = 0;
   while (at < b.length) {
     const first = b[at];
     const type = first >> 4;
-    const len = readVarInt(b, at + 1);
     const p: MqttPacket = { type, typeName: MQTT_TYPES[type] || `不明(${type})` };
-    if (!len || at + 1 + len.size + len.value > b.length) { p.truncated = true; out.push(p); break; }
+    if (type === 0) { p.malformed = '種類 0 のパケットは無い（パケットの頭ではないところから読んでいる）'; out.push(p); return { packets: out, rest: Buffer.alloc(0) }; }
+    const len = readVarInt(b, at + 1);
+    if (!len || at + 1 + len.size + len.value > b.length) {
+      p.truncated = true;
+      out.push(p);
+      return { packets: out, rest: b.subarray(at) };
+    }
     const start = at + 1 + len.size;
     const end = start + len.value;
     if (type === 3) {
@@ -57,10 +66,20 @@ export function decodeMqtt(input: string | Uint8Array, opt: { version?: 4 | 5 } 
       p.qos = (first >> 1) & 0x03;
       p.retain = !!(first & 0x01);
       let i = start;
+      const bad = (why: string) => { p.malformed = why; out.push(p); return { packets: out, rest: Buffer.alloc(0) }; };
+      if (i + 2 > end) return bad('topic の長さが読めない');
       const tlen = b.readUInt16BE(i); i += 2;
+      if (i + tlen > end) return bad(`topic の長さ（${tlen}）がパケットを超えている`);
       p.topic = b.subarray(i, i + tlen).toString('utf8'); i += tlen;
-      if (p.qos > 0) { p.packetId = b.readUInt16BE(i); i += 2; }
-      if (version === 5) { const pl = readVarInt(b, i); if (pl) i += pl.size + pl.value; }
+      if (p.qos > 0) {
+        if (i + 2 > end) return bad('パケット番号が読めない');
+        p.packetId = b.readUInt16BE(i); i += 2;
+      }
+      if (version === 5) {
+        const pl = readVarInt(b, i);
+        if (!pl || i + pl.size + pl.value > end) return bad('properties の長さがパケットを超えている');
+        i += pl.size + pl.value;
+      }
       const payload = b.subarray(i, end);
       p.payload = payload.toString('base64');
       try {
@@ -71,7 +90,42 @@ export function decodeMqtt(input: string | Uint8Array, opt: { version?: 4 | 5 } 
     out.push(p);
     at = end;
   }
-  return out;
+  return { packets: out, rest: Buffer.alloc(0) };
+}
+
+const toBuf = (input: string | Uint8Array) => (typeof input === 'string' ? Buffer.from(input, 'base64') : Buffer.from(input));
+
+/** base64 か Buffer で受け取り、入っているパケットを全部返す（どんな入力でも投げない） */
+export function decodeMqtt(input: string | Uint8Array, opt: { version?: 4 | 5 } = {}): MqttPacket[] {
+  return decodeCore(toBuf(input), opt.version ?? 4).packets;
+}
+
+/**
+ * フレームをまたぐパケットをつなぎ直して開く。接続（key）ごとに、前のフレームで切れた残りを覚えておく。
+ * 残りが maxBytes を超えたら捨てて、捨てたことを dropped に数える（黙って膨らませない）。
+ */
+export class MqttJoiner {
+  #rest = new Map<string, Buffer>();
+  dropped = 0;
+  readonly maxBytes: number;
+  constructor(maxBytes = 4_000_000) { this.maxBytes = maxBytes; }
+
+  feed(key: string, input: string | Uint8Array, opt: { version?: 4 | 5 } = {}): MqttPacket[] {
+    const prev = this.#rest.get(key);
+    const b = prev ? Buffer.concat([prev, toBuf(input)]) : toBuf(input);
+    const { packets, rest } = decodeCore(b, opt.version ?? 4);
+    if (rest.length && rest.length <= this.maxBytes) {
+      this.#rest.set(key, rest);
+      // 最後の切れたものは、次のフレームでつながるので返さない
+      return packets.filter((p) => !p.truncated);
+    }
+    if (rest.length) this.dropped++;
+    this.#rest.delete(key);
+    return packets;
+  }
+
+  /** 接続が閉じたときなどに、その接続の残りを捨てる */
+  forget(key: string): void { this.#rest.delete(key); }
 }
 
 /** 試験と、拡張の試しのために: PUBLISH を 1 つ組み立てる（QoS 0・版 4） */
