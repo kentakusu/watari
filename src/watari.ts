@@ -115,6 +115,8 @@ export type AffiliationOptions = {
   triggerConfig?: () => TriggerConfig | undefined;
   /** この所属の送る口の設定（呼ぶたびに読む） */
   outboxConfig?: () => OutboxConfig | undefined;
+  /** 閉じるボタンを押されても閉じずに裏で動かす窓か（窓を開くときに聞く） */
+  closeToBackground?: (session: string) => boolean;
 };
 
 export class NotFound extends Error {}
@@ -134,6 +136,7 @@ export class Affiliation {
   #stopping = false;
   /** 人が窓を閉じたなど、窓の顔ぶれが変わったとき（止めている最中は呼ばない） */
   onWindowsChanged?: () => void;
+  closeToBackground: (session: string) => boolean;
   /** 人（か外の出来事）が窓を閉じたとき（止めている最中は呼ばない） */
   onWindowClosed?: (w: { session: string; url: string; label: string }) => void;
   /** 渡が止めていないのに Chrome が終わったとき。そのとき開いていた窓を渡す */
@@ -151,6 +154,7 @@ export class Affiliation {
     this.missingGraceMs = opts.missingGraceMs ?? 10000;
     this.#triggerConfig = opts.triggerConfig ?? (() => undefined);
     this.#outboxConfig = opts.outboxConfig ?? (() => undefined);
+    this.closeToBackground = opts.closeToBackground ?? (() => false);
     this.#headless = !!opts.headless;
     mkdirSync(join(this.home, 'log'), { recursive: true });
   }
@@ -406,6 +410,7 @@ export class SessionWindow {
     this.#tap = new NetworkTap(cdp, sessionId);
     this.#tap.onCapture = (rule, c) => this.#onCapture(rule, c);
     await this.#syncCaptures();
+    if (this.#aff.closeToBackground(this.session)) await this.#armCloseGuard();
     await cdp.send('Page.navigate', { url }, sessionId);
     this.url ||= url;
     this.#aff.log({ type: 'window-opened', session: this.session, url, extensions: this.#aff.extensions.map((e) => e.name) });
@@ -467,6 +472,53 @@ export class SessionWindow {
     this.#aff.log({ type: 'navigate', session: this.session, url });
   }
 
+  /**
+   * 閉じるボタンを押されても閉じずに、最小化して裏で動かし続ける。
+   * ページに「閉じるときに問う」仕掛け（beforeunload）を入れ、その問いに渡が答える:
+   * - 直前にページ自身の移動の知らせ（frameRequestedNavigation など）が来ていれば、読み直し・移動なので通す
+   * - 来ていなければ、人が閉じようとしているので止めて最小化する
+   * Chrome は、人がページを一度も触っていないと問いを出さない。そのため読み込みのたびに渡が名札を 1 回押す。
+   * それでも閉じてしまったときは、keepOpen の開き直しが受け止める。渡が自分で閉じるとき（Target.closeTarget）は問いを通らない。
+   */
+  #guarded = false;
+  /** ページ自身が移動を始めてから、その移動が終わるまで（この間の問いは読み直し・移動なので通す） */
+  #navPendingSince = 0;
+  async #armCloseGuard(): Promise<void> {
+    const cdp = this.cdp, sid = this.#sid;
+    this.#guarded = true;
+    const top = (p: any, s?: string) => s === sid && p.frameId === this.targetId;
+    // 移動を始めた: ページ自身が求めた移動（読み直し・リンク・location の書き換え）
+    cdp.on('Page.frameRequestedNavigation', (p, s) => { if (top(p, s)) this.#navPendingSince = Date.now(); });
+    cdp.on('Page.frameScheduledNavigation', (p, s) => { if (top(p, s)) this.#navPendingSince = Date.now(); });
+    // 移動が終わった・取りやめた: もう移動中ではない（読み込み直後に閉じても、移動と取り違えない）
+    const done = (p: any, s?: string) => { if (s === sid && (p.frameId === this.targetId || p.frame?.id === this.targetId)) this.#navPendingSince = 0; };
+    cdp.on('Page.frameNavigated', (p, s) => done({ frameId: p.frame?.id }, s));
+    cdp.on('Page.frameClearedScheduledNavigation', done);
+    cdp.on('Page.javascriptDialogOpening', (p, s) => {
+      if (s !== sid || p.type !== 'beforeunload') return;
+      // 移動中と見なすのは、始まってから 10 秒まで（終わりの知らせを落としても、ずっと「移動中」にしない）
+      const isNavigation = this.#navPendingSince > 0 && Date.now() - this.#navPendingSince < 10000;
+      void cdp.send('Page.handleJavaScriptDialog', { accept: isNavigation }, sid).catch(() => {});
+      if (!isNavigation) {
+        this.#aff.log({ type: 'close-to-background', session: this.session });
+        void this.minimize();
+      }
+    });
+    // 問いの仕掛けはページの世界に入れる（読み直しても入るように）
+    await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: `addEventListener('beforeunload', (e) => { e.preventDefault(); e.returnValue = ''; });` }, sid);
+  }
+
+  /** 読み込みのたびに、名札の名前の部分を 1 回押して「人が触った」状態にする（閉じる問いを出せるように） */
+  async #activateForGuard(): Promise<void> {
+    if (!this.#guarded || this.#touching) return;
+    try {
+      const at = await this.#eval('globalThis.__watariTagNameRect && globalThis.__watariTagNameRect()');
+      if (!at) return;
+      await this.#mouse(at.x, at.y);
+      this.#aff.log({ type: 'close-guard-armed', session: this.session });
+    } catch {}
+  }
+
   /** 窓を最小化する（画面に窓が無い headless では何もしない） */
   async minimize(): Promise<boolean> {
     try {
@@ -500,7 +552,11 @@ export class SessionWindow {
       if (!this.#touching) { for (const f of this.#touchWaiters.splice(0)) f(); }
       return;
     }
-    if (msg.type === 'ready') { this.#aff.log({ type: 'page-ready', session: this.session, url: msg.url, watches: msg.watches }); return; }
+    if (msg.type === 'ready') {
+      this.#aff.log({ type: 'page-ready', session: this.session, url: msg.url, watches: msg.watches });
+      void this.#serial(() => this.#activateForGuard());
+      return;
+    }
     if (msg.type !== 'watch') return;
     const ext = this.#aff.extensions.find((e) => e.name === msg.ext);
     // 宣言していないサイトの出来事は拡張に渡さない（窓の中の判定に加えて、ここでも確かめる）
