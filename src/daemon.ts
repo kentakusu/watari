@@ -316,6 +316,11 @@ export async function startDaemon(opts: DaemonOptions) {
       if (!r) throw new Error(`台帳にその発言はありません: ${p.stream} / ${p.id}`);
       return r;
     },
+    'ledger.list': async (p) => {
+      const name = affName(p.affiliation);
+      if (typeof p.stream !== 'string' || !p.stream) throw new Error('stream が要ります');
+      return ledgerOf(name).list(p.stream, { order: p.order, limit: p.limit, cursor: p.cursor, before: p.before, after: p.after });
+    },
     'ledger.search': async (p) => {
       const name = affName(p.affiliation);
       if (typeof p.q !== 'string' || !p.q.trim()) throw new Error('q（探す言葉）が要ります');
