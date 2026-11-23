@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, existsSync, mkdirSync, writeFileSync, readdirSync } from 'node:fs';
 import { pruneCaptures } from '../src/capture.ts';
-import { perAffiliation } from '../src/home.ts';
+import { perAffiliation, keepOpenList } from '../src/home.ts';
 import { decodeMqtt, encodeMqttPublish, MqttJoiner } from '../src/mqtt.ts';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -131,6 +131,14 @@ test('MQTT: つなぎ直しの残りが上限を超えたら捨てて数える�
   const ps = J.feed('c', big.subarray(0, 50));
   assert.equal(J.dropped, 1);
   assert.equal(ps[0].truncated, true, '捨てたものは truncated として返す');
+});
+
+test('keepOpen は配列でも、1 つだけの文字列でも受け付ける（文字列を 1 文字ずつに分けない）', () => {
+  assert.deepEqual(keepOpenList(['team-a/x', 'team-b/y']), ['team-a/x', 'team-b/y']);
+  assert.deepEqual(keepOpenList('team-a/x'), ['team-a/x']);
+  assert.deepEqual(keepOpenList(undefined), []);
+  assert.deepEqual(keepOpenList(''), []);
+  assert.deepEqual(keepOpenList(['team-a/x', 3, null]), ['team-a/x']);
 });
 
 test('通知のコマンドが失敗したら、黙らずに失敗を返す', async () => {

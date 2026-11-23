@@ -31,13 +31,22 @@ export type Config = {
    * 閉じられても（Chrome ごと終わっても）開き直す窓のセッション名（所属/名前）。
    * 短い間に何度も閉じられたら（10 分で 3 回）、人が止めたいとみなして開き直すのをやめて知らせる
    */
-  keepOpen?: string[];
+  keepOpen?: string[] | string;
   /** keepOpen の窓を開き直すとき最小化するか（既定 true。閉じた人の邪魔をしないため。最小化でも見張りは止まらない） */
   keepOpenMinimized?: boolean;
   /** 所属ごとの送る口（{ "所属": {...}, "*": {...} }）。書いていない所属では送れない */
   outbox?: Record<string, OutboxConfig>;
   headless?: boolean;
 };
+
+/**
+ * keepOpen を窓の名前の配列にする。1 つだけを文字列で書いても受け付ける
+ * （文字列のまま扱うと 1 文字ずつに分かれ、どの窓も開き直さないまま黙ってしまう）
+ */
+export function keepOpenList(v: unknown): string[] {
+  if (typeof v === 'string') return v ? [v] : [];
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && !!x) : [];
+}
 
 /** 所属ごとの値を取り出す（数そのものなら全所属、表なら その所属 → "*" の順。無ければ undefined） */
 export function perAffiliation<T>(value: T | Record<string, T> | undefined, affiliation: string): T | undefined {

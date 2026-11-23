@@ -10,7 +10,7 @@ import { isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Affiliation, type Extension } from './watari.ts';
 import { configuredNotifier } from './notify.ts';
-import { ensureToken, restrictHome, perAffiliation, readConfig, readDaemonInfo, readExtensions, readWindows, writeDaemonInfo, writeExtensions, writeWindows, type ExtensionRecord, type WindowRecord } from './home.ts';
+import { ensureToken, restrictHome, perAffiliation, keepOpenList, readConfig, readDaemonInfo, readExtensions, readWindows, writeDaemonInfo, writeExtensions, writeWindows, type ExtensionRecord, type WindowRecord } from './home.ts';
 
 export type DaemonOptions = { home: string; port?: number; headless?: boolean; missingGraceMs?: number; notifyOverride?: (session: string, text: string) => Promise<void> };
 
@@ -107,7 +107,7 @@ export async function startDaemon(opts: DaemonOptions) {
 
   async function onLost(a: Affiliation, lost: Array<{ session: string; url: string; label: string }>, why: 'window' | 'chrome') {
     if (stopping) return;
-    const keep = new Set(readConfig(home).keepOpen ?? []);
+    const keep = new Set(keepOpenList(readConfig(home).keepOpen));
     const exts = a.extensions.map((e) => e.name).join('・') || '（拡張なし）';
     if (why === 'chrome') await tell(a, `【渡】所属 ${a.name} の Chrome が終わりました（窓を全部閉じたか、落ちた）。拡張（${exts}）は何も見ていません。`);
     for (const w of lost) {
