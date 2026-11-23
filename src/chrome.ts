@@ -74,12 +74,19 @@ export async function launchChrome(opts: LaunchOptions): Promise<Browser> {
     '--disable-background-timer-throttling',
     '--disable-backgrounding-occluded-windows',
     '--disable-renderer-backgrounding',
+    // 窓を全部閉じたら終わる（残ると、つながりの無い Chrome がプロファイルをつかんだままになる）
+    '--disable-background-mode',
   ];
-  if (opts.headless) args.push('--headless=new');
-  args.push('about:blank');
+  // 最初の空の窓（about:blank）を出さない。窓はセッションごとに渡が開く
+  if (opts.headless) args.push('--headless=new', 'about:blank');
+  else args.push('--no-startup-window');
   const child = spawn(opts.chromePath ?? findChrome(), args, { stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'] });
   const cdp = new Cdp(child.stdio[3] as any, child.stdio[4] as any);
   const exited = new Promise<void>((r) => child.once('exit', () => r()));
+  // つながりが切れたのに Chrome が残ったら、少し待って閉じる（自分の子なので、もう誰も操れない）
+  (child.stdio[4] as any).once('close', () => {
+    setTimeout(() => { if (child.exitCode === null) child.kill(); }, 5000);
+  });
   // 起きたことを 1 回の応答で確かめる（応答が無ければ起きていない）
   const busy = () => {
     const others = chromesOnProfile(opts.profileDir).filter((p) => isBrowserProcess(p) && p.pid !== child.pid).map((p) => p.pid);
