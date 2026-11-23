@@ -6,7 +6,7 @@ import { existsSync, unlinkSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Affiliation, type Extension } from './watari.ts';
-import { commandNotifier } from './notify.ts';
+import { configuredNotifier } from './notify.ts';
 import { ensureToken, readConfig, readDaemonInfo, readExtensions, readWindows, writeDaemonInfo, writeExtensions, writeWindows, type ExtensionRecord, type WindowRecord } from './home.ts';
 
 export type DaemonOptions = { home: string; port?: number; headless?: boolean; missingGraceMs?: number; notifyOverride?: (session: string, text: string) => Promise<void> };
@@ -43,7 +43,7 @@ export async function startDaemon(opts: DaemonOptions) {
   const affiliations = new Map<string, Affiliation>();
   const loadErrors: Array<{ affiliation: string; path: string; error: string }> = [];
 
-  const notifier = opts.notifyOverride ?? (cfg.notify ? commandNotifier(cfg.notify) : async (s: string, t: string) => { process.stdout.write(`[通知 → ${s}] ${t}\n`); });
+  const notifier = opts.notifyOverride ?? configuredNotifier(cfg.notify);
 
   async function extensionsFor(affiliation: string): Promise<Extension[]> {
     const out: Extension[] = [];

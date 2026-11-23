@@ -25,3 +25,15 @@ export function commandNotifier(command: string[]): Notifier {
 export const stdoutNotifier: Notifier = async (session, text) => {
   process.stdout.write(`[通知 → ${session}] ${text}\n`);
 };
+
+/** 設定の notify（配列か、所属ごとの表）から通知の口を作る。所属が表に無く "*" も無ければ標準出力に出す。 */
+export function configuredNotifier(notify: string[] | Record<string, string[]> | undefined): Notifier {
+  if (!notify) return stdoutNotifier;
+  if (Array.isArray(notify)) return commandNotifier(notify);
+  const table = new Map(Object.entries(notify).map(([k, v]) => [k, commandNotifier(v)]));
+  return (session, text) => {
+    const affiliation = session.split('/')[0];
+    const n = table.get(affiliation) ?? table.get('*') ?? stdoutNotifier;
+    return n(session, text);
+  };
+}
