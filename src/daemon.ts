@@ -182,6 +182,11 @@ export async function startDaemon(opts: DaemonOptions) {
     'window.type': async (p) => { await win(p.session).act.type(p.selector, p.text); return { ok: true }; },
     'window.press': async (p) => { await win(p.session).act.press(p.key, p.modifiers ?? 0); return { ok: true }; },
     'window.screenshot': async (p) => ({ png: await win(p.session).act.screenshot() }),
+    'window.scrollUntil': async (p) => {
+      if (typeof p.selector !== 'string' || !p.selector) throw new Error('selector が要ります');
+      return win(p.session).act.scrollUntil(p.selector, { within: p.within, max: p.max, stepRatio: p.stepRatio, waitMs: p.waitMs, endWaitMs: p.endWaitMs });
+    },
+    'window.scrollToTop': async (p) => { await win(p.session).act.scrollToTop(p.within); return { ok: true }; },
     'window.outline': async (p) => win(p.session).act.outline(p.selector ?? 'body', p.depth ?? 6, p.maxNodes ?? 400, p.textChars ?? 12),
     'window.touch': async (p) => { win(p.session).setTouching(!!p.on); return { ok: true }; },
     'window.focus': async (p) => { await win(p.session).focus(); return { ok: true }; },
@@ -344,6 +349,8 @@ export async function startDaemon(opts: DaemonOptions) {
 
   async function stop() {
     clearInterval(heartbeat);
+    // 止める直前の窓の URL を書き残す（30 秒ごとの書き残しの間に移った分を落とさない）
+    try { saveWindows(); } catch (e: any) { process.stderr.write(`渡: 窓を書き残せませんでした: ${e?.message ?? e}\n`); }
     for (const a of affiliations.values()) await a.stop().catch(() => {});
     for (const l of standaloneLedgers.values()) l.close();
     standaloneLedgers.clear();

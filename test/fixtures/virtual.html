@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="ja">
+<head><meta charset="utf-8"><title>見えている分しか描かない一覧</title>
+<style>
+  #list { height: 300px; overflow-y: auto; position: relative; border: 1px solid #999; }
+  #spacer { position: relative; }
+  .row { position: absolute; left: 0; right: 0; height: 30px; }
+</style></head>
+<body>
+<h1>トークの一覧（試験用）</h1>
+<div id="list"><div id="spacer"></div></div>
+<script>
+  // 全部で 300 件。最初は 200 件だけ持っていて、末尾まで送ると 800ms 後に続きの 100 件を読み込む
+  const ROW = 30;
+  let total = 200;
+  let loading = false;
+  const list = document.getElementById('list');
+  const spacer = document.getElementById('spacer');
+  const render = () => {
+    spacer.style.height = total * ROW + 'px';
+    const first = Math.floor(list.scrollTop / ROW);
+    const last = Math.min(total - 1, first + Math.ceil(300 / ROW));
+    spacer.replaceChildren();
+    for (let i = first; i <= last; i++) {
+      const li = document.createElement('div');
+      li.className = 'row item';
+      li.id = 'item-' + i;
+      li.style.top = i * ROW + 'px';
+      li.textContent = '部屋 ' + i;
+      spacer.appendChild(li);
+    }
+    if (!loading && total < 300 && list.scrollTop + list.clientHeight >= list.scrollHeight - 1) {
+      loading = true;
+      setTimeout(() => { total = 300; loading = false; render(); }, 800);
+    }
+  };
+  list.addEventListener('scroll', render);
+  render();
+</script>
+</body>
+</html>

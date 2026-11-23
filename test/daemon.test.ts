@@ -51,6 +51,10 @@ before(async () => {
   const html = readFileSync(join(here, 'fixtures', 'inbox.html'), 'utf8');
   site = createServer((req, res) => {
     const u = new URL(req.url ?? '/', 'http://x');
+    if (u.pathname === '/virtual') {
+      res.setHeader('content-type', 'text/html; charset=utf-8');
+      return res.end(readFileSync(join(here, 'fixtures', 'virtual.html')));
+    }
     const arrive = u.searchParams.get('arrive');
     const extra = arrive ? `<script>setTimeout(() => arrive(${JSON.stringify(arrive)}), 1500)</script>` : '';
     res.setHeader('content-type', 'text/html; charset=utf-8');
@@ -80,7 +84,7 @@ test('口: 合言葉なしでは断る・生死の確認だけは通す', async 
 
 test('MCP の道具がそろっている', async () => {
   const names = (await mcp.listTools()).tools.map((t) => t.name).sort();
-  for (const n of ['open_window', 'window_info', 'read', 'collect', 'click', 'type_text', 'press_key', 'screenshot', 'dom_outline', 'set_label', 'list_extensions', 'install_extension', 'remove_extension', 'search_captures', 'recent_log', 'ledger_unread', 'ledger_read', 'ledger_search', 'ledger_fires', 'send_message', 'outbox_list', 'watari_status']) {
+  for (const n of ['open_window', 'window_info', 'read', 'collect', 'click', 'type_text', 'press_key', 'scroll_until', 'screenshot', 'dom_outline', 'set_label', 'list_extensions', 'install_extension', 'remove_extension', 'search_captures', 'recent_log', 'ledger_unread', 'ledger_read', 'ledger_search', 'ledger_fires', 'send_message', 'outbox_list', 'watari_status']) {
     assert.ok(names.includes(n), `${n} がありません: ${names.join(',')}`);
   }
 });
@@ -88,7 +92,8 @@ test('MCP の道具がそろっている', async () => {
 test('窓を開いて読み・入れ・押し・画像を撮る', async () => {
   const r = await call(mcp, 'open_window', { url: siteUrl, label: '試験の窓' });
   assert.ok(!r.isError, textOf(r));
-  await waitFor(async () => !(await call(mcp, 'window_info')).isError, 15000, '窓の見張りが立つ');
+  // 見張りが立っても、題が付くのは読み込みのあと。題が付くまで待つ
+  await waitFor(async () => { const x = await call(mcp, 'window_info'); return !x.isError && !!JSON.parse(textOf(x)).title; }, 15000, '窓の題が付く');
   const info = JSON.parse(textOf(await call(mcp, 'window_info')));
   assert.equal(info.title, '試験用の受信箱');
   assert.equal(info.label, '試験の窓');
@@ -281,6 +286,28 @@ test('送る口: 画面で送り、台帳で確かめる（確かめ済み・確
   assert.ok(!(await call(mcp, 'remove_extension', { name: 'sender' })).isError);
 });
 
+test('見えている分しか描かない一覧を、目当ての要素が出るまでたどる（末尾では続きの読み込みを待つ）', async () => {
+  await call(mcp, 'open_window', { url: `${siteUrl}virtual` });
+  // 読み込み中は collect が失敗を返すので、そのあいだは「まだ」とみなす
+  await waitFor(async () => {
+    const r = await call(mcp, 'collect', { selector: '.item', fields: { id: '@id' } });
+    return !r.isError && JSON.parse(textOf(r)).items.length > 0;
+  }, 15000, '一覧が描かれる');
+  // 対照: たどる前は、奥の要素は無い
+  assert.equal(JSON.parse(textOf(await call(mcp, 'read', { selector: '#item-120' }))).text, null);
+  const r1 = JSON.parse(textOf(await call(mcp, 'scroll_until', { selector: '#item-120', within: '.item', wait_ms: 50 })));
+  assert.equal(r1.found, true);
+  assert.ok(r1.steps > 0);
+  // 最初に持っていない 250 番は、末尾で続きの読み込みを待って見つける
+  const r2 = JSON.parse(textOf(await call(mcp, 'scroll_until', { selector: '#item-250', within: '.item', wait_ms: 50, end_wait_ms: 1500 })));
+  assert.equal(r2.found, true, JSON.stringify(r2));
+  // 無いものは、末尾に着いたと返す
+  const r3 = JSON.parse(textOf(await call(mcp, 'scroll_until', { selector: '#item-999', within: '.item', wait_ms: 50, end_wait_ms: 300, back_to_top: true })));
+  assert.deepEqual([r3.found, r3.reachedEnd], [false, true]);
+  // 先頭に戻っている
+  assert.equal(JSON.parse(textOf(await call(mcp, 'read', { selector: '#item-0' }))).text, '部屋 0');
+});
+
 test('台帳に無い発言を読もうとすると、黙らずに失敗を返す', async () => {
   const r = await call(mcp, 'ledger_read', { stream: 'room-a', id: 'nai' });
   assert.equal(r.isError, true);
@@ -294,8 +321,9 @@ test('常駐を起こし直すと、開いていた窓が開き直される', as
   assert.deepEqual(s.restoreErrors, []);
   const a = s.affiliations.find((x: any) => x.name === 'test');
   assert.deepEqual(a?.windows.map((w: any) => [w.session, w.label]), [['test/mcp', '試験の窓']]);
-  await waitFor(async () => !(await call(mcp, 'window_info')).isError, 15000, '開き直した窓の見張りが立つ');
-  assert.equal(JSON.parse(textOf(await call(mcp, 'window_info'))).title, '試験用の受信箱');
+  await waitFor(async () => { const x = await call(mcp, 'window_info'); return !x.isError && !!JSON.parse(textOf(x)).title; }, 15000, '開き直した窓の題が付く');
+  // 止める直前にいたページ（その前の試験で移った一覧のページ）が開き直される
+  assert.equal(JSON.parse(textOf(await call(mcp, 'window_info'))).title, '見えている分しか描かない一覧');
 });
 
 test('人が所属を止めたら、その窓は次から開き直さない', async () => {

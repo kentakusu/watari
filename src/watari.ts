@@ -21,6 +21,21 @@ export type WatchEvent = {
 
 export type Key = 'Enter' | 'Backspace' | 'Tab' | 'Escape';
 
+export type ScrollOptions = {
+  /** 一覧の中にある要素（そのスクロールできる親を送る。省くとページ全体） */
+  within?: string;
+  /** 送る回数の上限（既定 60） */
+  max?: number;
+  /** 1 回に送る量（見えている高さに対する割合・既定 0.8） */
+  stepRatio?: number;
+  /** 送ったあと待つ時間（既定 500ms） */
+  waitMs?: number;
+  /** 末尾で、続きの読み込みを待つ時間（既定 1500ms） */
+  endWaitMs?: number;
+};
+
+export type ScrollResult = { found: boolean; steps: number; reachedEnd: boolean };
+
 /** 拡張に渡す、窓を操る道具。 */
 export type WindowApi = {
   session: string;
@@ -36,6 +51,13 @@ export type WindowApi = {
   /** 要素が出てくるまで待つ。出てこなければ NotFound */
   waitFor(selector: string, ms?: number): Promise<void>;
   click(selector: string): Promise<void>;
+  /**
+   * 見えている分しか描かない一覧を、探す要素が出るまで下へたどる。人が「今触ってる」の間は待つ。
+   * within: 一覧の中にある要素（そのスクロールできる親を送る。省くとページ全体）
+   */
+  scrollUntil(selector: string, opt?: ScrollOptions): Promise<ScrollResult>;
+  /** 一覧（within のスクロールできる親）を先頭に戻す */
+  scrollToTop(within?: string): Promise<void>;
   type(selector: string, text: string): Promise<void>;
   press(key: Key, modifiers?: number): Promise<void>;
   /** 拡張の notifyTo（無ければ窓のセッション）へ知らせる */
@@ -527,6 +549,48 @@ export class SessionWindow {
     await this.cdp.send('Input.insertText', { text }, this.#sid);
   }
 
+  /** within のスクロールできる親（無ければページ全体）を探す式 */
+  #scrollerExpr(within?: string): string {
+    return `(() => {
+      let el = ${within ? `document.querySelector(${JSON.stringify(within)})` : 'null'};
+      while (el && el !== document.body && el !== document.documentElement) {
+        const s = getComputedStyle(el);
+        if (/(auto|scroll)/.test(s.overflowY) && el.scrollHeight > el.clientHeight) return el;
+        el = el.parentElement;
+      }
+      return document.scrollingElement || document.documentElement;
+    })()`;
+  }
+
+  async #scrollUntil(selector: string, opt: ScrollOptions = {}): Promise<ScrollResult> {
+    const max = opt.max ?? 60, ratio = opt.stepRatio ?? 0.8, waitMs = opt.waitMs ?? 500, endWaitMs = opt.endWaitMs ?? 1500;
+    const sel = JSON.stringify(selector);
+    const exists = () => this.#eval(`!!document.querySelector(${sel})`);
+    for (let step = 0; step <= max; step++) {
+      if (await exists()) return { found: true, steps: step, reachedEnd: false };
+      if (step === max) break;
+      await this.#waitUntilFree();
+      const r = await this.#eval(`(() => { const s = ${this.#scrollerExpr(opt.within)};
+        const before = s.scrollTop; s.scrollTop = before + s.clientHeight * ${Number(ratio)};
+        return { before, after: s.scrollTop, height: s.scrollHeight }; })()`);
+      if (r.after === r.before) {
+        // 末尾: 続きの読み込みを待って、伸びたか・出てきたかを見る
+        await new Promise((res) => setTimeout(res, endWaitMs));
+        if (await exists()) return { found: true, steps: step + 1, reachedEnd: false };
+        const h = await this.#eval(`(${this.#scrollerExpr(opt.within)}).scrollHeight`);
+        if (h <= r.height) return { found: false, steps: step + 1, reachedEnd: true };
+      } else {
+        await new Promise((res) => setTimeout(res, waitMs));
+      }
+    }
+    return { found: false, steps: max, reachedEnd: false };
+  }
+
+  async #scrollToTop(within?: string): Promise<void> {
+    await this.#waitUntilFree();
+    await this.#eval(`(() => { const s = ${this.#scrollerExpr(within)}; s.scrollTop = 0; })()`);
+  }
+
   async #press(key: Key, modifiers = 0): Promise<void> {
     await this.#waitUntilFree();
     const keys: Record<Key, { code: string; keyCode: number; text?: string }> = {
@@ -581,6 +645,8 @@ export class SessionWindow {
      * 画面の作りを木で返す（拡張のセレクタを探すため）。読むだけ。
      * テキストは textChars 文字で切る（中身を読みたいときは read を使う）。
      */
+    scrollUntil: (selector: string, opt: ScrollOptions = {}) => this.#serial(async () => { const r = await this.#scrollUntil(selector, opt); this.#logAct('outside', { type: 'scroll-until', selector, ...r }); return r; }),
+    scrollToTop: (within?: string) => this.#serial(() => this.#scrollToTop(within)),
     outline: (selector = 'body', depth = 6, maxNodes = 400, textChars = 12) => this.#serial(() => this.#eval(`(() => {
       const root = document.querySelector(${JSON.stringify(selector)});
       if (!root) return null;
@@ -622,6 +688,8 @@ export class SessionWindow {
         throw new NotFound(`${ms}ms 待っても出てきません: ${selector}`);
       },
       click: async (selector) => { await this.#click(selector); log({ type: 'click', selector }); },
+      scrollUntil: async (selector, opt) => { const r = await this.#scrollUntil(selector, opt); log({ type: 'scroll-until', selector, ...r }); return r; },
+      scrollToTop: (within) => this.#scrollToTop(within),
       type: async (selector, text) => { await this.#type(selector, text); log({ type: 'type', selector, length: text.length }); },
       press: async (key, modifiers = 0) => { await this.#press(key, modifiers); log({ type: 'press', key, modifiers }); },
       notify: async (text) => {

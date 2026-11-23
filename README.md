@@ -88,6 +88,7 @@ claude mcp add watari --scope user -- node /mnt/d/watari/app/src/mcp.ts --home /
 - 見張っている要素がしばらく見つからないままなら、黙らずに「見つかりません」と通知します。
 - 人が窓の名札の「今触ってる」を押している間、`click`・`type`・`press` は待ちます（拡張も MCP も）。
 - 読む道具: `read`（最初の 1 つ）・`readAll`（全部）・`attrAll`（属性）・`waitFor`（出てくるまで待つ）。
+- 見えている分しか描かない一覧は `scrollUntil(探す要素, { within: 一覧の中の要素 })` で、探す要素が出るまで下へたどれます（末尾では続きの読み込みを待つ・人の「今触ってる」の間は待つ）。`scrollToTop(within)` で先頭に戻せます。MCP は `scroll_until`。
 - `notifyTo`（`所属/名前`）を書くと、通知を窓のセッションとは別のセッションへ送ります。
 - `report({ gaps, note })` で「取りこぼしたかもしれない数」を報告できます。状態（`watari_status`）に出ます。
 
@@ -107,7 +108,9 @@ async onCapture(c, w) { /* c.body を読み解いて w.notify(...) */ },
 
 - 窓そのものの通信に加え、**共有ワーカー・サービスワーカーの通信**も同じ規則で取ります（記録の `source` が `page` / `shared_worker` / `service_worker`、ワーカーなら `workerUrl`）。ワーカーは起きる前に止めてもらい、記録を有効にしてから動かします（あとからつなぐと最初の接続を取り逃がすため）。ワーカーは窓をまたいで共有されるので、その拡張の `sites` に当たる窓の `onCapture` に渡します。
 - バイナリ（WebSocket のバイナリのフレーム・HTTP のバイナリの応答）は、既定では長さだけ（`[binary N base64]`）を残します。規則に `binary: 'base64'` と書くと、中身を base64 のまま `body` に残します（記録の `encoding` が `'base64'`）。1MB を超えるものは、途中で切ると読めなくなるので残しません。
-- WebSocket の上の MQTT は `w.decode.mqtt(c.body)` で開けます。1 つのフレームの中の複数のパケットを順に開き、PUBLISH は `topic` と中身（`payload`（base64）・読めれば `payloadText`・JSON なら `payloadJson`）を返します。版 5 は `{ version: 5 }`。途中で切れているもの（フレームをまたぐもの）は `truncated: true` で返します。
+- WebSocket の上の MQTT は `w.decode.mqtt(c.body, { join: c.connection })` で開けます。1 つのフレームの中の複数のパケットを順に開き、PUBLISH は `topic` と中身（`payload`（base64）・読めれば `payloadText`・JSON なら `payloadJson`）を返します。版 5 は `version: 5`。
+  - `join` に記録の `connection`（接続の id）を渡すと、前のフレームで切れた残りとつなぎ直します（渡さなければ、切れたものは `truncated: true`）。
+  - どんな入力でも投げません。中の長さが合わない（フレームがパケットの途中から始まっている等）ときは `malformed` に理由を入れて、そこで止めます。
 - 残す日数は `config.json` の `captureRetentionDays`（今日を 1 日目と数える）。**書かなければ期限なし**です。数を書くと全部の所属に、`{ "reatex": 30, "*": 7 }` のように書くと所属ごとに効きます（書いていない所属は `"*"`、それも無ければ期限なし）。書き換えると、常駐を起こし直さなくても 1 時間以内に効きます。
 
 ### 拡張の状態
@@ -167,7 +170,7 @@ w.ledger.setOwnerRead('room-123', 455);                  // 持ち主がどこ�
 - 1 時間に `hourlyLimit` を超えた分は「まとめ」1 件に畳みます（`selfStreams` は上限の外）。
 - 設定を書き換えると、常駐を起こし直さなくても次の発言から効きます。台帳を残す日数は `ledgerRetentionDays`（書き方は `captureRetentionDays` と同じ・既定は期限なし）。
 
-MCP: `ledger_unread`（AI がまだ読んでいない発言・`for_me_only` で宛てだけ）・`ledger_read`（前の流れと返信先と一緒に読み、読んだ印を付ける。流れに抜けがあれば `contextGap`）・`ledger_search`（全文）・`ledger_fires`（最近の知らせと、届かなかった数・AI がまだ読んでいない知らせの数と最古の時刻）。
+MCP: `ledger_unread`（AI がまだ読んでいない発言・`for_me_only` で宛てだけ）・`ledger_read`（前の流れと返信先と一緒に読み、読んだ印を付ける。流れに抜けがあれば `contextGap`。`trigger_id` を渡すと、その知らせに入った発言をまとめて読む）・`ledger_search`（全文）・`ledger_fires`（最近の知らせと、届かなかった数・AI がまだ読んでいない知らせの数と最古の時刻）。
 
 ### 送る口（関所つき）
 

@@ -62,6 +62,19 @@ tool('press_key', 'キーを 1 回押す。modifiers は Alt=1, Ctrl=2, Meta=4, 
   { key: z.enum(['Enter', 'Backspace', 'Tab', 'Escape']), modifiers: z.number().int().min(0).max(15).optional() },
   async (a) => { await daemon.call('window.press', { session: mySession(), key: a.key, modifiers: a.modifiers ?? 0 }); return text('押しました'); });
 
+tool('scroll_until', '見えている分しか描かない一覧を、selector の要素が出るまで下へたどる。within には一覧の中にある要素を渡す（そのスクロールできる親を送る。省くとページ全体）。found・送った回数・末尾に着いたかを返す。人が「今触ってる」の間は待つ。',
+  {
+    selector: z.string(), within: z.string().optional(),
+    max: z.number().int().min(1).max(500).optional(), step_ratio: z.number().min(0.1).max(1).optional(),
+    wait_ms: z.number().int().min(0).max(10000).optional(), end_wait_ms: z.number().int().min(0).max(30000).optional(),
+    back_to_top: z.boolean().optional().describe('終わったら一覧を先頭に戻す'),
+  },
+  async (a) => {
+    const r = await daemon.call('window.scrollUntil', { session: mySession(), selector: a.selector, within: a.within, max: a.max, stepRatio: a.step_ratio, waitMs: a.wait_ms, endWaitMs: a.end_wait_ms });
+    if (a.back_to_top) await daemon.call('window.scrollToTop', { session: mySession(), within: a.within });
+    return text(JSON.stringify(r));
+  });
+
 tool('screenshot', '窓の見えている範囲を画像で返す。',
   {},
   async () => ({ content: [{ type: 'image' as const, data: (await daemon.call('window.screenshot', { session: mySession() })).png, mimeType: 'image/png' }] }));
