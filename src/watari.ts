@@ -9,6 +9,7 @@ import { Identity, type IdentityConfig } from './identity.ts';
 import { TriggerEngine, type TriggerConfig } from './triggers.ts';
 import { decodeMqtt, MqttJoiner, type MqttPacket } from './mqtt.ts';
 import { Outbox, type OutboxConfig, type OutboxEntry } from './outbox.ts';
+import { Patrol, type PatrolSpec, type PatrolStats, type RowState } from './patrol.ts';
 import { NetworkTap, appendCapture, type Capture, type CaptureRule, type CaptureSpec } from './capture.ts';
 
 export type WatchSpec = { name: string; selector: string; read?: string };
@@ -82,9 +83,13 @@ export type WindowApi = {
   ledger: {
     /** initial: 最初の一括取り込み（起こさない） */
     put(items: LedgerItemInput[], opt?: { initial?: boolean }): PutResult;
-    /** 持ち主がその部屋でどこまで読んだか（それ以下の発言では起こさない） */
+    /** 持ち主がその部屋でどこまで読んだか（それ以下の発言では起こさない）。巡回で開いた直後の報告は無視する */
     setOwnerRead(stream: string, seq: number, at?: string | number): void;
+    /** サイトが言う、その部屋の最新の番号。台帳が追いついていなければ巡回（patrol）が開きに行く */
+    setLatest(stream: string, seq: number): void;
   };
+  /** 突く: その部屋を、未読の印が無くても巡回で開き直させる（画面に取り直させる）。間が短いもの・跳ね返りは断る */
+  nudge(stream: string): { queued: boolean; reason?: string };
 };
 
 export type Extension = {
@@ -103,6 +108,8 @@ export type Extension = {
    * 動いている間は、同じ窓の拡張のほかの操作は待つ。
    */
   onSend?(req: { id: number; stream: string; text: string }, w: WindowApi): Promise<void>;
+  /** 巡回: 一覧の形を宣言すると、追いついていない部屋を本体が開きに行く（setLatest で最新の番号を報告する） */
+  patrol?: PatrolSpec;
 };
 
 export type Notifier = (session: string, text: string) => Promise<void>;
@@ -214,6 +221,7 @@ export class Affiliation {
       if (this.#stopping) return;
       for (const [s, w] of this.windows) if (w.targetId === p.targetId) {
         this.windows.delete(s);
+        w.stopPatrols();
         this.log({ type: 'window-closed', session: s });
         this.onWindowsChanged?.();
         this.onWindowClosed?.({ session: s, url: w.url, label: w.label });
@@ -348,6 +356,9 @@ export class Affiliation {
     return structuredClone({ triggers: this.#triggerConfig(), identity: this.#identityConfig(), outbox: this.#outboxConfig() });
   }
 
+  /** 今の「起こす条件」（巡回が大事な部屋を見分けるのに使う） */
+  triggerConfigNow(): TriggerConfig | undefined { return this.#triggerConfig(); }
+
   normalizeAuthors(items: LedgerItemInput[]): LedgerItemInput[] {
     this.#identity ??= new Identity(this.ledger().db);
     const r = this.#identity.apply(items, this.#identityConfig(), this.#triggerConfig()?.selfStreams ?? []);
@@ -368,6 +379,7 @@ export class Affiliation {
 
   async stop(): Promise<void> {
     this.#stopping = true;
+    for (const w of this.windows.values()) w.stopPatrols();
     this.#triggers?.stop();
     this.#ledger?.close();
     this.#triggers = undefined;
@@ -491,6 +503,11 @@ export class SessionWindow {
 
   /** 拡張の出し入れ・名札の変更を、開いている窓に効かせる。 */
   async applyExtensions(): Promise<void> {
+    // 入れ直した・外した拡張の巡回は止める（次の setLatest で新しい宣言から作り直す）
+    for (const [name, p] of this.#patrols) {
+      const e = this.#aff.extensions.find((x) => x.name === name);
+      if (!e || e.patrol !== p.spec) { p.stop(); this.#patrols.delete(name); }
+    }
     await this.#installScript();
     await this.#syncCaptures();
     if (this.#ctx) await this.#eval(reconfigureExpression(this.#injectConfig())).catch(() => {});
@@ -792,6 +809,82 @@ export class SessionWindow {
     })()`)),
   };
 
+  // ---- 巡回 ----
+  #patrols = new Map<string, Patrol>();
+
+  stopPatrols(): void {
+    for (const p of this.#patrols.values()) p.stop();
+    this.#patrols.clear();
+  }
+
+  patrolStats(): Record<string, PatrolStats> | undefined {
+    if (!this.#patrols.size) return undefined;
+    return Object.fromEntries([...this.#patrols].map(([n, p]) => [n, p.stats()]));
+  }
+
+  #patrolFor(ext: Extension): Patrol | undefined {
+    if (!ext.patrol) return undefined;
+    let p = this.#patrols.get(ext.name);
+    if (p && p.spec !== ext.patrol) { p.stop(); p = undefined; }
+    if (!p) {
+      const spec = ext.patrol;
+      const aff = this.#aff;
+      p = new Patrol(spec, {
+        behind: () => aff.ledger().behind(),
+        important: (s) => { const c = aff.triggerConfigNow(); return !!(c?.selfStreams?.includes(s) || c?.namedStreams?.includes(s)); },
+        rowState: (s) => this.#serial(() => this.#findRow(spec, s)),
+        open: (s, o) => this.#serial(async () => {
+          await this.#waitUntilFree();
+          if (o.reselect) {
+            // すでに開いている部屋は、よその行を開いてから戻す
+            const other = await this.#rowCenter(spec, s, true);
+            if (other) { await this.#mouse(other.x, other.y); await new Promise((r) => setTimeout(r, 500)); }
+          }
+          const c = await this.#rowCenter(spec, s, false);
+          if (!c) throw new NotFound(`巡回: 一覧に行が見つかりません: ${s}`);
+          await this.#mouse(c.x, c.y);
+        }),
+        selectedStream: () => this.#serial(() => this.#eval(`(() => { ${rowHelpers(spec)}
+          const r = rows().find((r) => has(r, ${JSON.stringify(spec.selected ?? '')})); return r ? keyOf(r) : null; })()`)),
+        caughtUp: (s, latest) => (aff.ledger().maxSeq(s) ?? -1) >= latest,
+        log: (rec) => aff.log({ session: this.session, ext: ext.name, ...rec }),
+      });
+      this.#patrols.set(ext.name, p);
+    }
+    return p;
+  }
+
+  async #rowState(spec: PatrolSpec, stream: string): Promise<RowState> {
+    return this.#eval(`(() => { ${rowHelpers(spec)}
+      const r = rows().find((r) => keyOf(r) === ${JSON.stringify(stream)});
+      return r ? { present: true, selected: has(r, ${JSON.stringify(spec.selected ?? '')}), unread: has(r, ${JSON.stringify(spec.unread ?? '')}) } : { present: false }; })()`);
+  }
+
+  /** 行を探す。描かれていなければ一覧をたどる（見つからなければ先頭に戻す） */
+  async #findRow(spec: PatrolSpec, stream: string): Promise<RowState> {
+    let r = await this.#rowState(spec, stream);
+    if (r.present) return r;
+    for (let step = 0; step < 30 && !r.present; step++) {
+      await this.#waitUntilFree();
+      const moved = await this.#eval(`(() => { const s = ${this.#scrollerExpr(spec.rows)}; const b = s.scrollTop; s.scrollTop = b + s.clientHeight * 0.8; return s.scrollTop !== b; })()`);
+      await new Promise((res) => setTimeout(res, 300));
+      r = await this.#rowState(spec, stream);
+      if (!moved) break;
+    }
+    if (!r.present) await this.#scrollToTop(spec.rows).catch(() => {});
+    return r;
+  }
+
+  /** 行（other なら、その部屋でも開いている部屋でもない行）の真ん中 */
+  async #rowCenter(spec: PatrolSpec, stream: string, other: boolean): Promise<{ x: number; y: number } | null> {
+    return this.#eval(`(() => { ${rowHelpers(spec)}
+      const want = ${JSON.stringify(stream)};
+      const r = ${other ? `rows().find((r) => keyOf(r) !== want && !has(r, ${JSON.stringify(spec.selected ?? '')}))` : 'rows().find((r) => keyOf(r) === want)'};
+      if (!r) return null;
+      r.scrollIntoView({ block: 'center' }); const b = r.getBoundingClientRect();
+      return b.width && b.height ? { x: b.left + b.width / 2, y: b.top + b.height / 2 } : null; })()`);
+  }
+
   /** 拡張に渡す道具。拡張の処理はもう列の中にいるので、#serial は通さない。 */
   #api(extension: Extension): WindowApi {
     const ext = extension.name;
@@ -840,7 +933,21 @@ export class SessionWindow {
           if (r.added.length || r.updated.length) log({ type: 'ledger-put', added: r.added.length, updated: r.updated.length, seenBefore: r.seenBefore, initial: !!opt.initial });
           return r;
         },
-        setOwnerRead: (stream, seq, at) => this.#aff.ledger().setOwnerRead(stream, seq, at),
+        setOwnerRead: (stream, seq, at) => {
+          if (this.#patrols.get(ext)?.ignoreOwnerRead(stream)) { log({ type: 'owner-read-ignored', stream, seq, why: '巡回で開いた直後' }); return; }
+          this.#aff.ledger().setOwnerRead(stream, seq, at);
+        },
+        setLatest: (stream, seq) => {
+          const L = this.#aff.ledger();
+          L.setLatest(stream, seq);
+          if ((L.maxSeq(stream) ?? -1) < seq) this.#patrolFor(extension)?.schedule();
+        },
+      },
+      nudge: (stream) => {
+        const p = this.#patrolFor(extension);
+        const r = p ? p.nudge(stream) : { queued: false, reason: '拡張に patrol が宣言されていません' };
+        log({ type: 'nudge', stream, ...r });
+        return r;
       },
       decode: { mqtt: (b64, opt = {}) => (opt.join ? this.#aff.mqttJoiner.feed(opt.join, b64, opt) : decodeMqtt(b64, opt)) },
       report: (r) => {
@@ -851,4 +958,15 @@ export class SessionWindow {
       },
     };
   }
+}
+
+/** ページの中で、一覧の行・行の鍵・印を見る小さな関数（patrol の宣言から作る） */
+function rowHelpers(spec: PatrolSpec): string {
+  const i = spec.key.lastIndexOf('@');
+  const sel = i < 0 ? spec.key : spec.key.slice(0, i);
+  const attr = i < 0 ? '' : spec.key.slice(i + 1);
+  return `const rows = () => [...document.querySelectorAll(${JSON.stringify(spec.rows)})];
+    const keyOf = (r) => { const el = ${JSON.stringify(sel)} ? r.querySelector(${JSON.stringify(sel)}) : r; if (!el) return null;
+      return ${JSON.stringify(attr)} ? el.getAttribute(${JSON.stringify(attr)}) : (el.textContent || '').trim(); };
+    const has = (r, s) => !!s && (r.matches(s) || !!r.querySelector(s));`;
 }
