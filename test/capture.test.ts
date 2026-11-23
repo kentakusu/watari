@@ -10,6 +10,9 @@ import type { Duplex } from 'node:stream';
 import { Affiliation, type Extension, type SessionWindow } from '../src/watari.ts';
 import { searchCaptures, type Capture } from '../src/capture.ts';
 import { openState } from '../src/state.ts';
+import { encodeMqttPublish, type MqttPacket } from '../src/mqtt.ts';
+
+const decoded: MqttPacket[] = [];
 
 const here = dirname(fileURLToPath(import.meta.url));
 const home = process.env.WATARI_TEST_HOME ? join(process.env.WATARI_TEST_HOME, 'capture') : join(here, '..', '.test-home', 'capture');
@@ -41,6 +44,7 @@ function wsRead(buf: Buffer): string {
 const page = `<!doctype html><meta charset="utf-8"><title>通信の試験</title><body><p id="s">0</p><script>
 document.cookie = 'sess=cookie-secret-value';
 window.startWorker = () => { new SharedWorker('/worker.js'); };
+window.openBinary = () => { new WebSocket('ws://' + location.host + '/wsbin'); new WebSocket('ws://' + location.host + '/wsdrop'); };
 window.go = async () => {
   const r = await fetch('/api/msgs?n=1', { headers: { Authorization: 'Bearer header-secret-token' } });
   await r.text();
@@ -55,10 +59,14 @@ const ext: Extension = {
   name: 'tap',
   sites: ['http://127.0.0.1:*/*'],
   watch: [],
-  capture: [{ name: 'msgs', url: 'http://127.0.0.1:*/api/*' }, { name: 'sock', url: 'ws://127.0.0.1:*/ws', kinds: ['ws'] }],
+  capture: [
+    { name: 'msgs', url: 'http://127.0.0.1:*/api/*' }, { name: 'sock', url: 'ws://127.0.0.1:*/ws', kinds: ['ws'] },
+    { name: 'bin', url: 'ws://127.0.0.1:*/wsbin', kinds: ['ws'], binary: 'base64' }, { name: 'drop', url: 'ws://127.0.0.1:*/wsdrop', kinds: ['ws'] },
+  ],
   onChange() {},
   onCapture(c, w) {
     seen.push(c);
+    if (c.name === 'bin' && c.encoding === 'base64') decoded.push(...w.decode.mqtt(c.body!));
     if (c.name === 'msgs') w.report({ gaps: 2, note: '番号が 2 つ飛んだ（試し）' });
     w.state.set('seen', (w.state.get<number>('seen') ?? 0) + 1);
   },
@@ -86,6 +94,12 @@ before(async () => {
   server.on('upgrade', (req, sock) => {
     const accept = createHash('sha1').update(String(req.headers['sec-websocket-key']) + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
     sock.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+    if (req.url === '/wsbin' || req.url === '/wsdrop') {
+      // つながったらすぐ、MQTT の PUBLISH をバイナリのフレーム（opcode 2）で送る
+      const mq = encodeMqttPublish('room/42', JSON.stringify({ seq: 9, text: 'バイナリの中身' }));
+      sock.write(Buffer.concat([Buffer.from([0x82, mq.length]), mq]));
+      return;
+    }
     sock.once('data', (d: Buffer) => { const m = wsRead(d); wsText(sock, m === '窓から' ? 'サーバーから' : `返事:${m}`); });
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
@@ -152,6 +166,21 @@ test('共有ワーカーの WebSocket も、起きた直後の最初の送信か
   assert.ok(w.every((c) => c.workerUrl?.endsWith('/worker.js') && c.session === 'cap/test'));
   // 窓そのものの通信の記録には source: page が付く
   assert.ok(seen.filter((c) => c.name === 'msgs').every((c) => c.source === 'page'));
+});
+
+test('バイナリのフレーム: 既定では長さだけ、binary: base64 では中身を残し、MQTT として開ける', async () => {
+  await eval_('openBinary()');
+  await waitFor(() => seen.some((c) => c.name === 'bin') && seen.some((c) => c.name === 'drop'), 10000, 'バイナリのフレームの記録');
+  const drop = seen.find((c) => c.name === 'drop')!;
+  assert.match(drop.body ?? '', /^\[binary \d+ base64\]$/);
+  assert.equal(drop.encoding, undefined);
+  const bin = seen.find((c) => c.name === 'bin')!;
+  assert.equal(bin.encoding, 'base64');
+  assert.equal(decoded.length, 1);
+  assert.equal(decoded[0].topic, 'room/42');
+  assert.deepEqual(decoded[0].payloadJson, { seq: 9, text: 'バイナリの中身' });
+  // 記録のファイルからも探せる（本文は base64 のまま）
+  assert.equal(searchCaptures(home, 'cap', { name: 'bin' }).items[0].body, bin.body);
 });
 
 test('拡張の状態は所属と拡張ごとのファイルに残り、読み直せる', () => {

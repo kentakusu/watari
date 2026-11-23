@@ -6,6 +6,7 @@ import { BINDING, WORLD, pageScript, reconfigureExpression, siteMatches, type In
 import { openState, type ExtensionState } from './state.ts';
 import { Ledger, type LedgerItemInput, type PutResult } from './ledger.ts';
 import { TriggerEngine, type TriggerConfig } from './triggers.ts';
+import { decodeMqtt, type MqttPacket } from './mqtt.ts';
 import { NetworkTap, appendCapture, type Capture, type CaptureRule, type CaptureSpec } from './capture.ts';
 
 export type WatchSpec = { name: string; selector: string; read?: string };
@@ -40,6 +41,11 @@ export type WindowApi = {
   notify(text: string): Promise<void>;
   /** 取りこぼしたかもしれない数などを報告する（状態に出る。「0 件」を「見ていない」と区別するため） */
   report(r: { gaps?: number; note?: string }): void;
+  /** よくある形を開く道具 */
+  decode: {
+    /** MQTT のパケット（base64）を開く。WebSocket の上の MQTT を読むため */
+    mqtt(base64: string, opt?: { version?: 4 | 5 }): MqttPacket[];
+  };
   /** 拡張の小さな状態（所属と拡張ごと・常駐の再起動をまたいで残る・1MB まで） */
   state: ExtensionState;
   /** 発言の台帳（所属ごと）。put で入れると、新しい発言だけが返り、起こす条件が判定される */
@@ -574,6 +580,7 @@ export class SessionWindow {
         },
         setOwnerRead: (stream, seq, at) => this.#aff.ledger().setOwnerRead(stream, seq, at),
       },
+      decode: { mqtt: (b64, opt) => decodeMqtt(b64, opt) },
       report: (r) => {
         const gaps = Math.max(0, Math.floor(r.gaps ?? 0));
         this.gaps += gaps;

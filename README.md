@@ -106,6 +106,8 @@ async onCapture(c, w) { /* c.body を読み解いて w.notify(...) */ },
 - 本文は 1 件 1MB で切ります（切ったら元の長さを `truncatedFrom` に残します）。本文が取れなかったら、黙らず `bodyError` に理由を残します。
 
 - 窓そのものの通信に加え、**共有ワーカー・サービスワーカーの通信**も同じ規則で取ります（記録の `source` が `page` / `shared_worker` / `service_worker`、ワーカーなら `workerUrl`）。ワーカーは起きる前に止めてもらい、記録を有効にしてから動かします（あとからつなぐと最初の接続を取り逃がすため）。ワーカーは窓をまたいで共有されるので、その拡張の `sites` に当たる窓の `onCapture` に渡します。
+- バイナリ（WebSocket のバイナリのフレーム・HTTP のバイナリの応答）は、既定では長さだけ（`[binary N base64]`）を残します。規則に `binary: 'base64'` と書くと、中身を base64 のまま `body` に残します（記録の `encoding` が `'base64'`）。1MB を超えるものは、途中で切ると読めなくなるので残しません。
+- WebSocket の上の MQTT は `w.decode.mqtt(c.body)` で開けます。1 つのフレームの中の複数のパケットを順に開き、PUBLISH は `topic` と中身（`payload`（base64）・読めれば `payloadText`・JSON なら `payloadJson`）を返します。版 5 は `{ version: 5 }`。途中で切れているもの（フレームをまたぐもの）は `truncated: true` で返します。
 - 残す日数は `config.json` の `captureRetentionDays`（今日を 1 日目と数える）。**書かなければ期限なし**です。数を書くと全部の所属に、`{ "reatex": 30, "*": 7 }` のように書くと所属ごとに効きます（書いていない所属は `"*"`、それも無ければ期限なし）。書き換えると、常駐を起こし直さなくても 1 時間以内に効きます。
 
 ### 拡張の状態

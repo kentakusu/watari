@@ -15,6 +15,11 @@ export type CaptureSpec = {
   kinds?: Array<'http' | 'ws'>;
   /** 本文も取るか（既定 true） */
   body?: boolean;
+  /**
+   * バイナリ（WebSocket のバイナリのフレーム・HTTP のバイナリの応答）をどう残すか。
+   * 'drop'（既定）: 長さだけ「[binary N base64]」／'base64': 中身を base64 のまま body に残す（encoding: 'base64'）
+   */
+  binary?: 'drop' | 'base64';
 };
 
 export type Capture = {
@@ -34,6 +39,8 @@ export type Capture = {
   dir?: 'in' | 'out';
   mimeType?: string;
   body?: string;
+  /** body が base64 のとき 'base64'（binary: 'base64' の規則でバイナリを取ったとき） */
+  encoding?: 'base64';
   /** 本文が上限を超えて切ったときの元の長さ */
   truncatedFrom?: number;
   /** 本文が取れなかった理由（取れないことを黙らない） */
@@ -164,7 +171,8 @@ export class NetworkTap {
       const rule = this.#match(url, 'ws');
       if (!rule) return;
       const data = String(p.response?.payloadData ?? '');
-      this.onCapture(rule, { kind: 'ws', url, dir, ...this.#body(rule, p.response?.opcode === 2 ? `[binary ${data.length} base64]` : data) });
+      // CDP はバイナリのフレーム（opcode 2）を base64 で渡してくる
+      this.onCapture(rule, { kind: 'ws', url, dir, ...this.#payload(rule, data, p.response?.opcode === 2) });
     };
     on('Network.webSocketFrameReceived', frame('in'));
     on('Network.webSocketFrameSent', frame('out'));
@@ -180,6 +188,16 @@ export class NetworkTap {
     this.#enabled = false;
   }
 
+  /** 本文を残す形に直す。バイナリ（base64 で来たもの）は規則の binary に従う */
+  #payload(rule: CaptureRule, data: string, isBase64: boolean): { body?: string; truncatedFrom?: number; encoding?: 'base64' } {
+    if (!isBase64) return this.#body(rule, data);
+    if (rule.binary !== 'base64') return this.#body(rule, `[binary ${data.length} base64]`);
+    // base64 を途中で切ると読めなくなるので、上限を超えたら残さず長さだけ書く
+    if (rule.body === false) return {};
+    if (data.length > MAX_BODY) return { body: `[binary ${data.length} base64・上限 ${MAX_BODY} を超えたので残していない]`, truncatedFrom: data.length };
+    return { body: data, encoding: 'base64' };
+  }
+
   #body(rule: CaptureRule, text: string): { body?: string; truncatedFrom?: number } {
     if (rule.body === false) return {};
     if (text.length <= MAX_BODY) return { body: text };
@@ -192,8 +210,7 @@ export class NetworkTap {
     if (rule.body === false) { this.onCapture(rule, base); return; }
     try {
       const b = await this.#cdp.send('Network.getResponseBody', { requestId }, this.#sid);
-      const text = b.base64Encoded ? `[binary ${String(b.body).length} base64]` : String(b.body);
-      this.onCapture(rule, { ...base, ...this.#body(rule, text) });
+      this.onCapture(rule, { ...base, ...this.#payload(rule, String(b.body), !!b.base64Encoded) });
     } catch (e: any) {
       this.onCapture(rule, { ...base, bodyError: e?.message ?? String(e) });
     }

@@ -37,7 +37,10 @@ export async function loadExtension(path: string): Promise<Extension> {
   if (e.notifyTo !== undefined && (typeof e.notifyTo !== 'string' || !/^[^/\s]+\/[^/\s]+$/.test(e.notifyTo))) throw bad('notifyTo は「所属/名前」');
   if (e.capture !== undefined) {
     if (!Array.isArray(e.capture)) throw bad('capture が配列ではない');
-    for (const c of e.capture) if (typeof c?.name !== 'string' || typeof c?.url !== 'string' || !c.url) throw bad('capture の各項に name と url が要る');
+    for (const c of e.capture) {
+      if (typeof c?.name !== 'string' || typeof c?.url !== 'string' || !c.url) throw bad('capture の各項に name と url が要る');
+      if (c.binary !== undefined && c.binary !== 'drop' && c.binary !== 'base64') throw bad(`capture の binary は 'drop' か 'base64'（${c.binary}）`);
+    }
   }
   if (e.onCapture !== undefined && typeof e.onCapture !== 'function') throw bad('onCapture が関数ではない');
   return e;
