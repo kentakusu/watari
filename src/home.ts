@@ -27,6 +27,13 @@ export type Config = {
   ledgerRetentionDays?: number | Record<string, number>;
   /** 所属ごとの「起こす条件」（{ "所属": {...}, "*": {...} }）。書いていない所属では起こさない */
   triggers?: Record<string, TriggerConfig>;
+  /**
+   * 閉じられても（Chrome ごと終わっても）開き直す窓のセッション名（所属/名前）。
+   * 短い間に何度も閉じられたら（10 分で 3 回）、人が止めたいとみなして開き直すのをやめて知らせる
+   */
+  keepOpen?: string[];
+  /** keepOpen の窓を開き直すとき最小化するか（既定 true。閉じた人の邪魔をしないため。最小化でも見張りは止まらない） */
+  keepOpenMinimized?: boolean;
   /** 所属ごとの送る口（{ "所属": {...}, "*": {...} }）。書いていない所属では送れない */
   outbox?: Record<string, OutboxConfig>;
   headless?: boolean;

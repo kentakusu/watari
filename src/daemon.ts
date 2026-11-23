@@ -82,10 +82,65 @@ export async function startDaemon(opts: DaemonOptions) {
       outboxConfig: () => { const o = readConfig(home).outbox; return o?.[name] ?? o?.['*']; },
     });
     a.onWindowsChanged = () => saveWindows();
+    a.onWindowClosed = (w) => void onLost(a, [w], 'window');
+    a.onChromeExited = (lost) => void onLost(a, lost, 'chrome');
     await a.start();
     await a.setExtensions(await extensionsFor(name));
     affiliations.set(name, a);
     return a;
+  }
+
+  // ---- 窓が閉じられた・Chrome が終わったとき: 黙って止まらない ----
+  // 拡張の通知先に 1 行で知らせる。keepOpen に入っている窓は開き直す（短い間に何度も閉じられたらやめて知らせる）
+  let stopping = false; // 常駐が自分で止まっている最中は、閉じた窓を知らせも開き直しもしない
+  const reopenTimes = new Map<string, number[]>();
+  const reopening = new Set<string>();
+
+  async function tell(a: Affiliation, text: string) {
+    const targets = a.notifyTargets();
+    if (!targets.length) { a.log({ type: 'lost-not-notified', text }); return; }
+    for (const t of targets) {
+      try { await notifier(t, text); a.log({ type: 'lost-notified', to: t, text }); }
+      catch (e: any) { a.log({ type: 'lost-notify-failed', to: t, error: String(e?.message ?? e) }); }
+    }
+  }
+
+  async function onLost(a: Affiliation, lost: Array<{ session: string; url: string; label: string }>, why: 'window' | 'chrome') {
+    if (stopping) return;
+    const keep = new Set(readConfig(home).keepOpen ?? []);
+    const exts = a.extensions.map((e) => e.name).join('・') || '（拡張なし）';
+    if (why === 'chrome') await tell(a, `【渡】所属 ${a.name} の Chrome が終わりました（窓を全部閉じたか、落ちた）。拡張（${exts}）は何も見ていません。`);
+    for (const w of lost) {
+      if (!keep.has(w.session)) {
+        if (why === 'window') await tell(a, `【渡】窓 ${w.session} が閉じられました。この窓では拡張（${exts}）は何も見ていません。開き直すには open_window を、閉じられても開き直すなら config.json の keepOpen に ${w.session} を入れてください。`);
+        continue;
+      }
+      if (reopening.has(w.session)) continue; // 窓が閉じた → Chrome が終わった、と続けて来たときに二重に開かない
+      const now = Date.now();
+      const times = (reopenTimes.get(w.session) ?? []).filter((t) => now - t < 10 * 60000);
+      if (times.length >= 3) {
+        await tell(a, `【渡】窓 ${w.session} が短い間に何度も閉じられたので、開き直すのをやめました（10 分で ${times.length} 回）。人が止めたいのでなければ open_window で開き直してください。`);
+        continue;
+      }
+      reopenTimes.set(w.session, [...times, now]);
+      reopening.add(w.session);
+      try {
+        await new Promise((r) => setTimeout(r, 2000)); // Chrome ごと終わるところなら、それを待つ
+        if (stopping) return;
+        const target = await aff(a.name); // 動いていなければ Chrome を起こし直す
+        const reopened = await target.openWindow(w.session, w.url, w.label);
+        // 閉じた人の邪魔をしないよう、最小化で開き直す（最小化でも見張りは止まらない）
+        const minimized = readConfig(home).keepOpenMinimized === false ? false : await reopened.minimize();
+        saveWindows();
+        target.log({ type: 'window-reopened', session: w.session, why, minimized });
+        await tell(target, `【渡】窓 ${w.session} が${why === 'chrome' ? '（Chrome ごと）' : ''}閉じられたので、${minimized ? '最小化で' : ''}開き直しました（keepOpen）。閉じていた間のものを拡張が読み直すかは、拡張の作り次第です。`);
+      } catch (e: any) {
+        a.log({ type: 'window-reopen-failed', session: w.session, error: String(e?.message ?? e) });
+        await tell(a, `【渡】窓 ${w.session} を開き直せませんでした: ${e?.message ?? e}`);
+      } finally {
+        reopening.delete(w.session);
+      }
+    }
   }
 
   function triggerConfigOf(name: string): TriggerConfig | undefined {
@@ -348,6 +403,7 @@ export async function startDaemon(opts: DaemonOptions) {
   const heartbeat = setInterval(beat, 30000);
 
   async function stop() {
+    stopping = true;
     clearInterval(heartbeat);
     // 止める直前の窓の URL を書き残す（30 秒ごとの書き残しの間に移った分を落とさない）
     try { saveWindows(); } catch (e: any) { process.stderr.write(`渡: 窓を書き残せませんでした: ${e?.message ?? e}\n`); }

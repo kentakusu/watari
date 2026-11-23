@@ -314,6 +314,56 @@ test('見えている分しか描かない一覧を、目当ての要素が出�
   assert.equal(JSON.parse(textOf(await call(mcp, 'read', { selector: '#item-0' }))).text, '部屋 0');
 });
 
+test('拡張の入った窓が閉じられたら黙らずに知らせ、keepOpen の窓は開き直す（Chrome ごと終わっても）', async () => {
+  // ほかの試験の窓を巻き込まないよう、別の所属（keep）で試す
+  const p = join(home, 'watcher-ext.mjs');
+  writeFileSync(p, `export default { name: 'watcher', sites: ['http://127.0.0.1:*/*'], watch: [], notifyTo: 'test/boss', onChange() {} };`);
+  await daemon.methods['window.open']({ session: 'keep/closer', url: siteUrl });
+  await daemon.methods['extension.install']({ affiliation: 'keep', path: p, by: 'test/mcp' });
+  const sessions = async () => ((await daemon.methods.status({})).affiliations.find((x: any) => x.name === 'keep')?.windows ?? []).map((w: any) => w.session);
+  const toBoss = () => notes.filter((n) => n.session === 'test/boss').map((n) => n.text);
+
+  // (a) keepOpen に無い窓: 閉じられたら知らせ、開き直さない
+  let before = toBoss().length;
+  await daemon.methods['window.close']({ session: 'keep/closer' });
+  await waitFor(() => toBoss().length > before, 10000, '閉じられた知らせ');
+  assert.match(toBoss().at(-1)!, /窓 keep\/closer が閉じられました。.*watcher.*keepOpen/);
+  await new Promise((r) => setTimeout(r, 2500));
+  assert.ok(!(await sessions()).includes('keep/closer'), 'keepOpen に無いのに開き直している');
+
+  // (b) keepOpen の窓: 閉じられたら開き直して知らせる
+  const cfgPath = join(home, 'config.json');
+  const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'));
+  writeFileSync(cfgPath, JSON.stringify({ ...cfg, keepOpen: ['keep/keeper'] }));
+  await daemon.methods['window.open']({ session: 'keep/keeper', url: siteUrl, label: '残す窓' });
+  before = toBoss().length;
+  await daemon.methods['window.close']({ session: 'keep/keeper' });
+  await waitFor(() => toBoss().slice(before).some((t) => /keep\/keeper が閉じられたので、(最小化で)?開き直しました/.test(t)), 15000, '開き直した知らせ');
+  assert.ok((await sessions()).includes('keep/keeper'));
+
+  // (c) Chrome ごと終わっても、keepOpen の窓は Chrome を起こし直して開き直す
+  const started = readFileSync(join(home, 'log', 'keep.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((r) => r.type === 'chrome-started');
+  before = toBoss().length;
+  process.kill(started.at(-1).pid);
+  await waitFor(() => toBoss().slice(before).some((t) => /Chrome が終わりました/.test(t)), 15000, 'Chrome が終わった知らせ');
+  await waitFor(() => toBoss().slice(before).some((t) => /（Chrome ごと）閉じられたので、(最小化で)?開き直しました/.test(t)), 20000, 'Chrome ごとの開き直し');
+  assert.ok((await sessions()).includes('keep/keeper'));
+
+  // (d) 短い間に何度も閉じられたら、開き直すのをやめて知らせる（10 分で 3 回まで。(b)(c) で 2 回使った）
+  before = toBoss().length;
+  await daemon.methods['window.close']({ session: 'keep/keeper' });
+  await waitFor(() => toBoss().slice(before).some((t) => /開き直しました/.test(t)), 15000, '3 回目の開き直し');
+  before = toBoss().length;
+  await daemon.methods['window.close']({ session: 'keep/keeper' });
+  await waitFor(() => toBoss().slice(before).some((t) => /開き直すのをやめました/.test(t)), 15000, 'やめた知らせ');
+  await new Promise((r) => setTimeout(r, 2500));
+  assert.ok(!(await sessions()).includes('keep/keeper'));
+
+  writeFileSync(cfgPath, JSON.stringify(cfg));
+  await daemon.methods['extension.remove']({ affiliation: 'keep', name: 'watcher', by: 'test/mcp' });
+  await daemon.methods['affiliation.stop']({ name: 'keep' }); // 人が止めた所属は、知らせも開き直しもしない
+});
+
 test('台帳に無い発言を読もうとすると、黙らずに失敗を返す', async () => {
   const r = await call(mcp, 'ledger_read', { stream: 'room-a', id: 'nai' });
   assert.equal(r.isError, true);

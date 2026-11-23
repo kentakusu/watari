@@ -134,6 +134,15 @@ export class Affiliation {
   #stopping = false;
   /** 人が窓を閉じたなど、窓の顔ぶれが変わったとき（止めている最中は呼ばない） */
   onWindowsChanged?: () => void;
+  /** 人（か外の出来事）が窓を閉じたとき（止めている最中は呼ばない） */
+  onWindowClosed?: (w: { session: string; url: string; label: string }) => void;
+  /** 渡が止めていないのに Chrome が終わったとき。そのとき開いていた窓を渡す */
+  onChromeExited?: (lost: Array<{ session: string; url: string; label: string }>) => void;
+
+  /** この所属の拡張の通知先（重なりなし）。窓が閉じたことなどを知らせる先 */
+  notifyTargets(): string[] {
+    return [...new Set(this.#extensions.map((e) => e.notifyTo).filter((t): t is string => !!t))];
+  }
 
   constructor(opts: AffiliationOptions) {
     this.name = opts.name;
@@ -174,11 +183,24 @@ export class Affiliation {
     this.browser = await launchChrome({ profileDir: join(this.home, 'profiles', this.name), headless: this.#headless });
     this.startedAt = now();
     this.log({ type: 'chrome-started', pid: this.browser.process.pid, waitedForLeftovers: this.browser.leftovers.waitedFor });
-    this.browser.process.once('exit', (code) => this.log({ type: 'chrome-exited', code }));
+    this.browser.process.once('exit', (code) => {
+      this.log({ type: 'chrome-exited', code });
+      // 渡が止めたのでなく Chrome が終わった（人が窓を全部閉じた・落ちた）。窓は全部なくなっている
+      if (!this.#stopping) {
+        const lost = [...this.windows.values()].map((w) => ({ session: w.session, url: w.url, label: w.label }));
+        this.windows.clear();
+        this.onChromeExited?.(lost);
+      }
+    });
     // 人が窓を閉じたら、そのセッションの窓を一覧から外す
     this.browser.cdp.on('Target.targetDestroyed', (p) => {
       if (this.#stopping) return;
-      for (const [s, w] of this.windows) if (w.targetId === p.targetId) { this.windows.delete(s); this.log({ type: 'window-closed', session: s }); this.onWindowsChanged?.(); }
+      for (const [s, w] of this.windows) if (w.targetId === p.targetId) {
+        this.windows.delete(s);
+        this.log({ type: 'window-closed', session: s });
+        this.onWindowsChanged?.();
+        this.onWindowClosed?.({ session: s, url: w.url, label: w.label });
+      }
     });
     await this.browser.cdp.send('Target.setDiscoverTargets', { discover: true });
     await this.#watchWorkers();
@@ -443,6 +465,15 @@ export class SessionWindow {
   async navigate(url: string): Promise<void> {
     await this.#serial(() => this.cdp.send('Page.navigate', { url }, this.#sid));
     this.#aff.log({ type: 'navigate', session: this.session, url });
+  }
+
+  /** 窓を最小化する（画面に窓が無い headless では何もしない） */
+  async minimize(): Promise<boolean> {
+    try {
+      const { windowId } = await this.cdp.send('Browser.getWindowForTarget', { targetId: this.targetId });
+      await this.cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
+      return true;
+    } catch { return false; }
   }
 
   async focus(): Promise<void> {
