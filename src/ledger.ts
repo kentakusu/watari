@@ -120,6 +120,34 @@ export class Ledger {
       CREATE TABLE IF NOT EXISTS seen (stream TEXT NOT NULL, id TEXT NOT NULL, first_seen_at TEXT NOT NULL, PRIMARY KEY (stream, id));
       CREATE TABLE IF NOT EXISTS streams (stream TEXT PRIMARY KEY, kind TEXT, name TEXT, owner_read_seq INTEGER, owner_read_at TEXT);
     `);
+    // 前の版の台帳には無い欄を足す（巡回: サイトが言う「その部屋の最新の番号」）
+    const cols = (this.db.prepare('PRAGMA table_info(streams)').all() as any[]).map((r) => r.name);
+    if (!cols.includes('latest_seq')) this.db.exec('ALTER TABLE streams ADD COLUMN latest_seq INTEGER; ALTER TABLE streams ADD COLUMN latest_at TEXT;');
+  }
+
+  /** サイトが言う「その部屋の最新の番号」を残す（巡回で、台帳がそこまで追いついているかを見るため。小さくはしない） */
+  setLatest(stream: string, seq: number): void {
+    this.db.prepare(`INSERT INTO streams (stream, latest_seq, latest_at) VALUES (?, ?, ?)
+      ON CONFLICT(stream) DO UPDATE SET latest_seq = MAX(COALESCE(streams.latest_seq, -1), excluded.latest_seq), latest_at = excluded.latest_at`)
+      .run(stream, seq, new Date().toISOString());
+  }
+
+  latestSeq(stream: string): number | undefined {
+    const r = this.db.prepare('SELECT latest_seq FROM streams WHERE stream = ?').get(stream) as any;
+    return r?.latest_seq ?? undefined;
+  }
+
+  /** 台帳に入っている、その部屋のいちばん大きい番号 */
+  maxSeq(stream: string): number | undefined {
+    const r = this.db.prepare('SELECT MAX(seq) AS m FROM items WHERE stream = ?').get(stream) as any;
+    return r?.m ?? undefined;
+  }
+
+  /** 最新の番号まで台帳が追いついていない部屋（巡回で開く候補） */
+  behind(): Array<{ stream: string; latest: number; have?: number }> {
+    const rows = this.db.prepare(`SELECT s.stream, s.latest_seq AS latest, (SELECT MAX(seq) FROM items i WHERE i.stream = s.stream) AS have
+      FROM streams s WHERE s.latest_seq IS NOT NULL`).all() as any[];
+    return rows.filter((r) => r.have === null || r.have < r.latest).map((r) => ({ stream: r.stream, latest: r.latest, have: r.have ?? undefined }));
   }
 
   close(): void { this.db.close(); }

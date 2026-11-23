@@ -70,6 +70,13 @@ export async function loadExtension(path: string): Promise<Extension> {
   }
   if (e.onCapture !== undefined && typeof e.onCapture !== 'function') throw bad('onCapture が関数ではない');
   if (e.onSend !== undefined && typeof e.onSend !== 'function') throw bad('onSend が関数ではない');
+  if (e.patrol !== undefined) {
+    const pt = e.patrol as any;
+    if (!pt || typeof pt !== 'object') throw bad('patrol がオブジェクトではない');
+    if (typeof pt.rows !== 'string' || !pt.rows) throw bad('patrol.rows（一覧の行のセレクタ）が要る');
+    if (typeof pt.key !== 'string' || !pt.key) throw bad('patrol.key（行の中の部屋の鍵）が要る');
+    for (const k of ['selected', 'unread', 'home']) if (pt[k] !== undefined && typeof pt[k] !== 'string') throw bad(`patrol.${k} は文字列`);
+  }
   return e;
 }
 
@@ -285,6 +292,7 @@ export async function startDaemon(opts: DaemonOptions) {
           // 画面も通信も長く動いていない＝見えていないかもしれない（ログイン切れ・止まった画面）。「0 件」と区別するため
           stale: !w.lastEventAt || Date.now() - Date.parse(w.lastEventAt) > staleMs,
           gaps: w.gaps, lastReport: w.lastReport,
+          patrol: w.patrolStats(),
         })),
       })),
     }),

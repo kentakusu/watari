@@ -1,0 +1,28 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>巡回の試験</title>
+<style>.row { padding: 8px; border: 1px solid #ccc; } .selected { background: #def; } .unread::after { content: ' ●'; }</style>
+<!-- 一覧の行を押すと、その部屋の発言を「取りに行き」、#opened に「部屋:最新の番号」を出す（取り直しの代わり） -->
+<div id="list">
+  <div class="row selected" data-id="home">ホーム</div>
+  <div class="row unread" data-id="a">部屋 A</div>
+  <div class="row" data-id="b">部屋 B（よそで読んだ）</div>
+</div>
+<div id="latest"></div>
+<div id="opened"></div>
+<div id="clicks"></div>
+<script>
+  const latest = { home: 0, a: 3, b: 4 };
+  const clicks = [];
+  for (const r of document.querySelectorAll('.row')) {
+    r.addEventListener('click', () => {
+      for (const x of document.querySelectorAll('.row')) x.classList.remove('selected');
+      r.classList.add('selected');
+      r.classList.remove('unread');
+      clicks.push(r.dataset.id);
+      document.getElementById('clicks').textContent = clicks.join(',');
+      setTimeout(() => { document.getElementById('opened').textContent = `${r.dataset.id}:${latest[r.dataset.id]}:${clicks.length}`; }, 200);
+    });
+  }
+  setTimeout(() => { document.getElementById('latest').textContent = Object.entries(latest).filter(([k]) => k !== 'home').map(([k, v]) => `${k}=${v}`).join(','); }, 500);
+</script>

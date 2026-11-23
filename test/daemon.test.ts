@@ -51,6 +51,10 @@ before(async () => {
   const html = readFileSync(join(here, 'fixtures', 'inbox.html'), 'utf8');
   site = createServer((req, res) => {
     const u = new URL(req.url ?? '/', 'http://x');
+    if (u.pathname === '/patrol') {
+      res.setHeader('content-type', 'text/html; charset=utf-8');
+      return res.end(readFileSync(join(here, 'fixtures', 'patrol.html')));
+    }
     if (u.pathname === '/virtual') {
       res.setHeader('content-type', 'text/html; charset=utf-8');
       return res.end(readFileSync(join(here, 'fixtures', 'virtual.html')));
@@ -329,6 +333,40 @@ test('送る口: 画面で送り、台帳で確かめる（確かめ済み・確
   const list = JSON.parse(textOf(await call(mcp, 'outbox_list')));
   assert.deepEqual([list.counts.confirmed, list.counts.unconfirmed, list.counts.failed], [1, 1, 1]);
   assert.ok(!(await call(mcp, 'remove_extension', { name: 'sender' })).isError);
+});
+
+test('巡回: 拡張は一覧の形と最新の番号だけ。未読の部屋を本体が開き、台帳が追いついたら home へ戻す。開いた直後の既読は無視する', async () => {
+  const p = join(home, 'patrol-ext.mjs');
+  writeFileSync(p, `export default {
+    name: 'patrol-ext', sites: ['http://127.0.0.1:*/patrol*'],
+    watch: [{ name: '最新', selector: '#latest' }, { name: '開いた', selector: '#opened' }],
+    patrol: { rows: '#list .row', key: '@data-id', selected: '.selected', unread: '.unread', home: 'home', settleMs: 3000 },
+    onChange(e, w) {
+      if (!e.value) return;
+      if (e.watch === '最新') { for (const kv of e.value.split(',')) { const [k, v] = kv.split('='); w.ledger.setLatest(k, Number(v)); } return; }
+      const [room, n] = e.value.split(':');
+      const items = [];
+      for (let i = 1; i <= Number(n); i++) items.push({ stream: room, id: room + '-' + i, seq: i, at: new Date().toISOString(), text: room + ' の ' + i });
+      if (items.length) w.ledger.put(items);
+      // サイトは開くと既読にする（その報告）。巡回で開いた直後なので、本体は持ち主の既読として扱わない
+      w.ledger.setOwnerRead(room, Number(n));
+    },
+  };`);
+  assert.ok(!(await call(mcp, 'install_extension', { path: p })).isError);
+  await call(mcp, 'open_window', { url: siteUrl + 'patrol' });
+  await waitFor(async () => (await call(mcp, 'read', { selector: '#clicks' })).content?.[0]?.text?.includes('home'), 20000, '巡回が A を開いて home へ戻る');
+  assert.equal(JSON.parse(textOf(await call(mcp, 'read', { selector: '#clicks' }))).text, 'a,home', 'B（未読でない・大事でない）まで開いた、または順番が違う');
+  const a = JSON.parse(textOf(await call(mcp, 'ledger_list', { stream: 'a', order: 'asc' })));
+  assert.deepEqual(a.items.map((x: any) => x.seq), [1, 2, 3]);
+  const tok = readFileSync(join(home, 'token'), 'utf8').trim();
+  const st = await (await fetch(`http://127.0.0.1:${port}/rpc`, { method: 'POST', headers: { authorization: `Bearer ${tok}`, 'content-type': 'application/json' }, body: JSON.stringify({ method: 'status' }) })).json() as any;
+  const win = st.result.affiliations.find((x: any) => x.name === 'test').windows.find((x: any) => x.session === 'test/mcp');
+  assert.equal(win.patrol['patrol-ext'].caughtUp, 1);
+  assert.ok(win.patrol['patrol-ext'].ignoredOwnerReads >= 1, '開いた直後の既読を無視していない');
+  const logText = readFileSync(join(home, 'log', 'test.jsonl'), 'utf8');
+  assert.match(logText, /"type":"patrol-opened","stream":"a"/);
+  assert.match(logText, /"type":"owner-read-ignored","stream":"a"/);
+  assert.ok(!(await call(mcp, 'remove_extension', { name: 'patrol-ext' })).isError);
 });
 
 test('見えている分しか描かない一覧を、目当ての要素が出るまでたどる（末尾では続きの読み込みを待つ）', async () => {
