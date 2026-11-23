@@ -124,6 +124,22 @@ export function writeDaemonInfo(home: string, info: DaemonInfo): void {
   writeFileSync(join(home, 'daemon.json'), JSON.stringify(info) + '\n');
 }
 
+/**
+ * 所属ごとの見せ方。'hidden' = 画面の無い Chrome で裏で動かす／'visible' = 窓のある Chrome。
+ * 書いていない所属は 'visible'（最初のログインに人が窓を使うため）
+ */
+export type Display = 'hidden' | 'visible';
+
+export function readDisplay(home: string): Record<string, Display> {
+  return readJson<Record<string, Display>>(join(home, 'display.json'), {});
+}
+
+export function writeDisplay(home: string, name: string, d: Display): void {
+  const all = readDisplay(home);
+  all[name] = d;
+  writeFileSync(join(home, 'display.json'), JSON.stringify(all, null, 2) + '\n');
+}
+
 /** 開いていた窓。常駐が落ちても、再起動しても、次に起きたときに開き直す。 */
 export type WindowRecord = { session: string; url: string; label: string };
 

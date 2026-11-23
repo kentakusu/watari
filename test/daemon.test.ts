@@ -84,7 +84,7 @@ test('口: 合言葉なしでは断る・生死の確認だけは通す', async 
 
 test('MCP の道具がそろっている', async () => {
   const names = (await mcp.listTools()).tools.map((t) => t.name).sort();
-  for (const n of ['open_window', 'window_info', 'read', 'collect', 'click', 'type_text', 'press_key', 'scroll_until', 'screenshot', 'dom_outline', 'set_label', 'list_extensions', 'install_extension', 'remove_extension', 'search_captures', 'recent_log', 'ledger_unread', 'ledger_read', 'ledger_search', 'ledger_fires', 'send_message', 'outbox_list', 'watari_status']) {
+  for (const n of ['open_window', 'window_info', 'read', 'collect', 'click', 'type_text', 'press_key', 'scroll_until', 'screenshot', 'dom_outline', 'set_display', 'set_label', 'list_extensions', 'install_extension', 'remove_extension', 'search_captures', 'recent_log', 'ledger_unread', 'ledger_read', 'ledger_search', 'ledger_fires', 'send_message', 'outbox_list', 'watari_status']) {
     assert.ok(names.includes(n), `${n} がありません: ${names.join(',')}`);
   }
 });
@@ -362,6 +362,44 @@ test('拡張の入った窓が閉じられたら黙らずに知らせ、keepOpen
   writeFileSync(cfgPath, JSON.stringify(cfg));
   await daemon.methods['extension.remove']({ affiliation: 'keep', name: 'watcher', by: 'test/mcp' });
   await daemon.methods['affiliation.stop']({ name: 'keep' }); // 人が止めた所属は、知らせも開き直しもしない
+});
+
+test('見せ方: keepOpen の窓の閉じるボタンで「裏で動かす」に切り替わり、窓も拡張も戻る。「窓を出す」で戻る', async () => {
+  // 試験の Chrome は画面なしに固定しているが、見せ方の記録と切り替え（Chrome の起こし直し・窓の開き直し）は同じ道を通る
+  const cfgPath = join(home, 'config.json');
+  const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'));
+  writeFileSync(cfgPath, JSON.stringify({ ...cfg, keepOpen: ['disp/main'] }));
+  const p = join(home, 'disp-ext.mjs');
+  writeFileSync(p, `export default { name: 'disp-ext', sites: ['http://127.0.0.1:*/*'], watch: [], onChange() {} };`);
+  await daemon.methods['window.open']({ session: 'disp/main', url: siteUrl });
+  await daemon.methods['extension.install']({ affiliation: 'disp', path: p, by: 'test/mcp' });
+  const logOf = () => readFileSync(join(home, 'log', 'disp.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  await waitFor(() => logOf().some((r) => r.type === 'close-guard-armed'), 15000, '閉じるボタンの仕掛けが入る');
+  const statusOf = async () => (await daemon.methods.status({})).affiliations.find((x: any) => x.name === 'disp');
+  assert.equal((await statusOf()).display, 'visible');
+
+  // 閉じるボタンと同じ閉じ方（閉じるときの問いを通る）
+  const w = daemon.affiliation('disp')!.windows.get('disp/main')!;
+  await w.cdp.send('Page.close', {}, w.sessionId).catch(() => {});
+  await waitFor(() => logOf().some((r) => r.type === 'display-switched' && r.display === 'hidden'), 30000, '裏で動かすへの切り替え');
+  let s = await statusOf();
+  assert.equal(s.display, 'hidden');
+  assert.deepEqual(s.windows.map((x: any) => x.session), ['disp/main']);
+  assert.deepEqual(s.extensions, ['disp-ext']);
+  assert.equal(JSON.parse(readFileSync(join(home, 'display.json'), 'utf8')).disp, 'hidden');
+
+  // 窓を出す
+  const r = await daemon.methods['affiliation.display']({ name: 'disp', display: 'visible', by: '試験' });
+  assert.deepEqual([r.display, r.changed, r.windows], ['visible', true, ['disp/main']]);
+  s = await statusOf();
+  assert.equal(s.display, 'visible');
+  assert.deepEqual(s.windows.map((x: any) => x.session), ['disp/main']);
+  // 同じ見せ方をもう一度選んでも、起こし直さない
+  assert.equal((await daemon.methods['affiliation.display']({ name: 'disp', display: 'visible' })).changed, false);
+  await assert.rejects(daemon.methods['affiliation.display']({ name: 'disp', display: 'half' }), /'hidden'.*'visible'/);
+
+  writeFileSync(cfgPath, JSON.stringify(cfg));
+  await daemon.methods['affiliation.stop']({ name: 'disp' });
 });
 
 test('台帳に無い発言を読もうとすると、黙らずに失敗を返す', async () => {

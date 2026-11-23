@@ -142,8 +142,11 @@ function buildMenu() {
     sub.push({ label: `拡張（${a.extensions.length}）`, enabled: false });
     for (const name of a.extensions) sub.push({ label: `外す: ${name}`, click: act(() => rpc('extension.remove', { affiliation: a.name, name, by: 'トレイ' })) });
     sub.push({ type: 'separator' });
+    // 見せ方: 裏で動かす ⇔ 窓を出す（切り替えのあいだ数秒止まる・ログインは残る）
+    if (a.display === 'hidden') sub.push({ label: '窓を出す（ログインや画面を見るとき）', click: act(() => rpc('affiliation.display', { name: a.name, display: 'visible', by: 'トレイ' })) });
+    else sub.push({ label: '裏で動かす（窓を隠す）', click: act(() => rpc('affiliation.display', { name: a.name, display: 'hidden', by: 'トレイ' })) });
     sub.push({ label: 'この所属の Chrome を止める', click: act(() => rpc('affiliation.stop', { name: a.name })) });
-    items.push({ label: `${a.name}${a.running ? '' : '（止まっている）'} — 窓 ${a.windows.length}`, submenu: sub });
+    items.push({ label: `${a.name}${a.running ? '' : '（止まっている）'} — 窓 ${a.windows.length}${a.display === 'hidden' ? '（裏で動いている）' : ''}`, submenu: sub });
   }
   if (status && !status.affiliations.length) items.push({ label: 'まだ Chrome は動いていません（Claude が窓を開くと起きます）', enabled: false });
   if (!status) items.push({ label: '常駐を起こす', click: act(() => startDaemon()) });

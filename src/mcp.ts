@@ -88,6 +88,10 @@ tool('dom_outline', '窓の画面の作り（タグ・id・class・data- 属性�
   },
   async (a) => text(JSON.stringify(await daemon.call('window.outline', { session: mySession(), selector: a.selector, depth: a.depth, maxNodes: a.max_nodes, textChars: a.text_chars }))));
 
+tool('set_display', 'このセッションの所属の見せ方を切り替える。visible: 窓のある Chrome（人がログインする・画面を見るとき）／hidden: 画面の無い Chrome で裏で動かす。切り替えのあいだ（数秒〜10 秒）は見張りが止まる。ログインはそのまま残る。',
+  { display: z.enum(['visible', 'hidden']) },
+  async (a) => text(JSON.stringify(await daemon.call('affiliation.display', { name: affiliation(), display: a.display, by: mySession() }))));
+
 tool('set_label', '窓の名札の名前を変える。',
   { label: z.string().min(1).max(60) },
   async (a) => { await daemon.call('window.label', { session: mySession(), label: a.label }); return text('変えました'); });
