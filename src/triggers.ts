@@ -41,7 +41,9 @@ export type TriggerConfig = {
   namedStreams?: string[];
   /**
    * 起こしてよい書き手の種類（所属全体の既定・selfStreams と namedStreams にも効く）。例: ["human"]。
-   * 書き手の種類が分からない発言（authorKind が無い）は通す
+   * 書き手の種類が分からない発言（authorKind が無い）は通す。
+   * 規則に authorKinds を書いたら、その規則で当たった発言には規則の指定を使う（ほかの人の Bot のメンションだけ起こす、など）。
+   * ただし持ち主の側の発言（mine）には、いつもこの所属全体の指定を当てる
    */
   authorKinds?: string[];
   /** selfStreams の静けさ（既定 0 = 待たずにすぐ出す） */
@@ -62,8 +64,10 @@ const D = { maxAgeMinutes: 60, quietSeconds: 20, maxWaitSeconds: 120, hourlyLimi
 /** spokeRecently: 持ち主がその部屋で hours 時間内に発言したか（台帳の mine の発言で判定する） */
 export function matchedRules(item: LedgerItem, cfg: TriggerConfig, spokeRecently: (stream: string, hours: number) => boolean = () => false): string[] {
   const out: string[] = [];
-  if (cfg.selfStreams?.includes(item.stream)) out.push('self');
-  if (cfg.namedStreams?.includes(item.stream)) out.push('named');
+  // 所属全体の authorKinds に通るか（書き手の種類が分からない発言は通す）
+  const globalOk = !cfg.authorKinds?.length || !item.authorKind || cfg.authorKinds.includes(item.authorKind);
+  if (globalOk && cfg.selfStreams?.includes(item.stream)) out.push('self');
+  if (globalOk && cfg.namedStreams?.includes(item.stream)) out.push('named');
   for (const r of cfg.rules ?? []) {
     const conds: boolean[] = [];
     if (r.toMe) conds.push(!!item.toMe);
@@ -75,7 +79,10 @@ export function matchedRules(item: LedgerItem, cfg: TriggerConfig, spokeRecently
     if (r.authors?.length) conds.push(r.authors.some((a) => item.author === a || (!!item.authorName && item.authorName.includes(a))));
     if (r.authorKinds?.length) conds.push(!!item.authorKind && r.authorKinds.includes(item.authorKind));
     if (r.spokeRecentlyHours) conds.push(spokeRecently(item.stream, r.spokeRecentlyHours));
-    if (conds.length && conds.every(Boolean)) out.push(r.name);
+    // 規則に authorKinds を書いたら、その規則では所属全体の authorKinds より規則の指定を使う。
+    // ただし持ち主の側の発言（mine）には、いつも所属全体の指定を当てる（自分の Bot の返事で自分を起こさないため）
+    const authorOk = globalOk || (!!r.authorKinds?.length && !item.mine);
+    if (conds.length && conds.every(Boolean) && authorOk) out.push(r.name);
   }
   return out;
 }
@@ -87,7 +94,6 @@ export function skipReason(item: LedgerItem, cfg: TriggerConfig, enabledAt: stri
   if (item.at < enabledAt) return '有効にする前の発言';
   if (now - Date.parse(item.at) > (cfg.maxAgeMinutes ?? D.maxAgeMinutes) * 60000) return '古すぎる';
   if (item.recalled) return '取り消し';
-  if (cfg.authorKinds?.length && item.authorKind && !cfg.authorKinds.includes(item.authorKind)) return `書き手の種類（${item.authorKind}）`;
   if (item.mine && !self) return '自分の発言';
   if (!self && !named && item.seq !== undefined && ownerReadSeq !== undefined && item.seq <= ownerReadSeq) return '持ち主が先に読んだ';
   return null;
