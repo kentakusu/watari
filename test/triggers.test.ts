@@ -141,6 +141,19 @@ test('書き手の種類: 所属全体の既定で Bot を起こさない（名�
   assert.deepEqual(sent.map((s) => s.line.match(/stream=(\S+)/)![1]).sort(), ['人', '分からない'], sent.map((s) => s.line).join('\n'));
 });
 
+test('規則に書き手の種類を書くと、所属全体の既定より規則の指定を使う。持ち主の側の発言には全体の既定を当てる', async () => {
+  cfg.authorKinds = ['human'];
+  cfg.rules = [{ name: 'mention', toMe: true, authorKinds: ['human', 'bot'] }, { name: 'urgent', keywords: ['至急'] }];
+  put([
+    item({ stream: 'k1', streamName: 'ほかの人のBotのメンション', toMe: true, authorKind: 'bot' }),  // 規則の指定で起こす
+    item({ stream: 'k2', streamName: 'Botの至急', text: '至急', authorKind: 'bot' }),                 // 規則に指定なし → 全体の既定で弾く
+    item({ stream: 'me-dm', streamName: '自分の1:1の自分のBot', toMe: true, authorKind: 'bot', mine: true }), // 持ち主の側の Bot → 全体の既定で弾く（self も mention も）
+    item({ stream: 'k3', streamName: '人の至急', text: '至急', authorKind: 'human' }),
+  ]);
+  await sleep(400);
+  assert.deepEqual(sent.map((s) => s.line.match(/stream=(\S+)/)![1]).sort(), ['ほかの人のBotのメンション', '人の至急'].sort(), sent.map((s) => s.line).join('\n'));
+});
+
 test('条件の書き手の種類: その種類の発言だけに当たる', async () => {
   cfg.rules = [{ name: 'botAlert', authorKinds: ['bot'], keywords: ['障害'] }];
   put([item({ stream: 'c1', authorKind: 'bot', text: '障害が起きました' }), item({ stream: 'c2', authorKind: 'human', text: '障害の話' })]);
