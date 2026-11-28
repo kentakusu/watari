@@ -18,6 +18,8 @@ const notes: Array<{ session: string; text: string }> = [];
 let site: Server;
 let siteUrl = '';
 let flakyArmed = false;
+/** 知らせを遅くする（開き直したあとの知らせを待つ間に、また閉じられる場合を作るため） */
+let slowNotifyMs = 0;
 let flakyUntil = 0;
 let daemon: Awaited<ReturnType<typeof startDaemon>>;
 let mcp: Client;
@@ -78,7 +80,7 @@ before(async () => {
   });
   await new Promise<void>((r) => site.listen(0, '127.0.0.1', () => r()));
   siteUrl = `http://127.0.0.1:${(site.address() as any).port}/`;
-  daemon = await startDaemon({ home, headless: true, missingGraceMs: 300, notifyOverride: async (session, text) => { notes.push({ session, text }); } });
+  daemon = await startDaemon({ home, headless: true, missingGraceMs: 300, notifyOverride: async (session, text) => { notes.push({ session, text }); if (slowNotifyMs) await new Promise((r) => setTimeout(r, slowNotifyMs)); } });
   mcp = await connect(['--session', 'test/mcp']);
 });
 
@@ -504,6 +506,26 @@ test('拡張の入った窓が閉じられたら黙らずに知らせ、keepOpen
   await daemon.methods['window.close']({ session: 'keep/keeper' });
   await waitFor(() => toBoss().slice(before).some((t) => /keep\/keeper が閉じられたので、(最小化で)?開き直しました/.test(t)), 15000, '開き直した知らせ');
   assert.ok((await sessions()).includes('keep/keeper'));
+
+  // (b2) 開き直したあとの知らせを待っている間にまた閉じられても、見送らずに開き直す
+  //      （(d) の「10 分で 3 回」を食わないよう、別の窓で試す）
+  writeFileSync(cfgPath, JSON.stringify({ ...cfg, keepOpen: ['keep/keeper', 'keep/racer'] }));
+  await daemon.methods['window.open']({ session: 'keep/racer', url: siteUrl });
+  slowNotifyMs = 6000;
+  try {
+    await daemon.methods['window.close']({ session: 'keep/racer' });
+    await new Promise((r) => setTimeout(r, 500));
+    await waitFor(async () => (await sessions()).includes('keep/racer'), 15000, '1 回目の開き直し');
+    // まだ「開き直しました」の知らせを待っている間に、もう一度閉じる
+    await daemon.methods['window.close']({ session: 'keep/racer' });
+    await new Promise((r) => setTimeout(r, 500));
+    await waitFor(async () => (await sessions()).includes('keep/racer'), 15000, '知らせを待つ間に閉じられたあとの開き直し');
+  } finally {
+    slowNotifyMs = 0;
+  }
+  await new Promise((r) => setTimeout(r, 6500)); // 2 回目の開き直しの知らせが終わるのを待つ
+  writeFileSync(cfgPath, JSON.stringify({ ...cfg, keepOpen: ['keep/keeper'] })); // 先に keepOpen から外してから閉じる
+  await daemon.methods['window.close']({ session: 'keep/racer' });
 
   // (c) Chrome ごと終わっても、keepOpen の窓は Chrome を起こし直して開き直す
   const started = readFileSync(join(home, 'log', 'keep.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((r) => r.type === 'chrome-started');
