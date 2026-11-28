@@ -22,6 +22,8 @@ const loginItemOn = () => app.getLoginItemSettings(loginItem()).openAtLogin;
 const loginArg = process.argv.find((a) => a.startsWith('--login-item='))?.slice('--login-item='.length);
 if (loginArg === 'on' || loginArg === 'off') setLoginItem(loginArg === 'on');
 
+// トレイは窓を持たない（メニューと知らせだけ）ので、GPU のプロセスを起こさない（メモリを減らす）
+app.disableHardwareAcceleration();
 if (!app.requestSingleInstanceLock()) app.quit();
 app.on('window-all-closed', (e) => e.preventDefault());
 
