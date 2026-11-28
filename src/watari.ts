@@ -381,6 +381,22 @@ export class Affiliation {
   /** 今の「起こす条件」（巡回が大事な部屋を見分けるのに使う） */
   triggerConfigNow(): TriggerConfig | undefined { return this.#triggerConfig(); }
 
+  /**
+   * 台帳に入れる（拡張の w.ledger.put と、外から入れる口の ledger.put が同じここを通る）。
+   * 書き手の見分け → 最初の取り込みの見分け → 入れる → 起こす条件 → 送った本文の突き合わせ、の順。
+   */
+  putItems(items: LedgerItemInput[], opt: { initial?: boolean }, log: (rec: object) => void): PutResult {
+    // この所属の最初の取り込み（台帳がまだ何も見ていない）は、印が無くても一括取り込みとみなして起こさない
+    const firstEver = this.ledger().neverSeen();
+    const r = this.ledger().put(this.normalizeAuthors(items));
+    const initial = !!opt.initial || firstEver;
+    this.triggers().consider(r.added, { ...opt, initial });
+    // 送った本文が自分の発言として入ったかを確かめる
+    for (const c of this.outbox().matchLedger([...r.added, ...r.updated])) log({ type: 'send-confirmed', id: c.id, stream: c.stream, by: c.confirmedBy });
+    if (r.added.length || r.updated.length) log({ type: 'ledger-put', added: r.added.length, updated: r.updated.length, seenBefore: r.seenBefore, initial });
+    return r;
+  }
+
   normalizeAuthors(items: LedgerItemInput[]): LedgerItemInput[] {
     this.#identity ??= new Identity(this.ledger().db);
     const r = this.#identity.apply(items, this.#identityConfig(), this.#triggerConfig()?.selfStreams ?? []);
@@ -1056,17 +1072,7 @@ export class SessionWindow {
       state: this.#aff.stateFor(ext),
       config: () => this.#aff.configView(),
       ledger: {
-        put: (items, opt = {}) => {
-          // この所属の最初の取り込み（台帳がまだ何も見ていない）は、拡張が印を付けなくても一括取り込みとみなして起こさない
-          const firstEver = this.#aff.ledger().neverSeen();
-          const r = this.#aff.ledger().put(this.#aff.normalizeAuthors(items));
-          opt = { ...opt, initial: !!opt.initial || firstEver };
-          this.#aff.triggers().consider(r.added, opt);
-          // 送った本文が自分の発言として入ったかを確かめる
-          for (const c of this.#aff.outbox().matchLedger([...r.added, ...r.updated])) log({ type: 'send-confirmed', id: c.id, stream: c.stream, by: c.confirmedBy });
-          if (r.added.length || r.updated.length) log({ type: 'ledger-put', added: r.added.length, updated: r.updated.length, seenBefore: r.seenBefore, initial: !!opt.initial });
-          return r;
-        },
+        put: (items, opt = {}) => this.#aff.putItems(items, opt, log),
         setOwnerRead: (stream, seq, at) => {
           if (this.#patrols.get(ext)?.ignoreOwnerRead(stream)) { log({ type: 'owner-read-ignored', stream, seq, why: '巡回で開いた直後' }); return; }
           this.#aff.ledger().setOwnerRead(stream, seq, at);

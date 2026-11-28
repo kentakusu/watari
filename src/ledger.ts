@@ -206,6 +206,32 @@ export class Ledger {
     return res;
   }
 
+  /**
+   * 外から入れる口（ledger.put）の入れ手（source）ごとの記録。0 件でも呼べば「見に行った時刻」を残す
+   * （「新着なし」と「入れ手が止まっている」を分けるため）。
+   */
+  recordSource(name: string, r: { added?: number; updated?: number; error?: string }): void {
+    this.db.exec(`CREATE TABLE IF NOT EXISTS sources (name TEXT PRIMARY KEY, last_call_at TEXT, last_added_at TEXT, calls INTEGER NOT NULL DEFAULT 0,
+      added INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL DEFAULT 0, errors INTEGER NOT NULL DEFAULT 0, last_error TEXT, last_error_at TEXT)`);
+    const now = new Date().toISOString();
+    this.db.prepare('INSERT OR IGNORE INTO sources (name) VALUES (?)').run(name);
+    if (r.error !== undefined) {
+      this.db.prepare('UPDATE sources SET errors = errors + 1, last_error = ?, last_error_at = ? WHERE name = ?').run(r.error.slice(0, 500), now, name);
+      return;
+    }
+    this.db.prepare(`UPDATE sources SET last_call_at = ?, calls = calls + 1, added = added + ?, updated = updated + ?,
+      last_added_at = CASE WHEN ? > 0 THEN ? ELSE last_added_at END WHERE name = ?`).run(now, r.added ?? 0, r.updated ?? 0, r.added ?? 0, now, name);
+  }
+
+  sources(): Array<{ name: string; lastCallAt?: string; lastAddedAt?: string; calls: number; added: number; updated: number; errors: number; lastError?: string; lastErrorAt?: string }> {
+    const has = this.db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sources'`).get();
+    if (!has) return [];
+    return (this.db.prepare('SELECT * FROM sources ORDER BY name').all() as any[]).map((r) => ({
+      name: r.name, lastCallAt: r.last_call_at ?? undefined, lastAddedAt: r.last_added_at ?? undefined, calls: r.calls, added: r.added, updated: r.updated,
+      errors: r.errors, lastError: r.last_error ?? undefined, lastErrorAt: r.last_error_at ?? undefined,
+    }));
+  }
+
   /** まだ 1 件も見たことがない（この所属の最初の取り込みかどうかに使う。消したあとも見たことは残る） */
   neverSeen(): boolean {
     return !this.db.prepare('SELECT 1 FROM seen LIMIT 1').get();

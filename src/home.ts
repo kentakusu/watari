@@ -39,6 +39,8 @@ export type Config = {
   keepOpenMinimized?: boolean;
   /** 所属ごとの送る口（{ "所属": {...}, "*": {...} }）。書いていない所属では送れない */
   outbox?: Record<string, OutboxConfig>;
+  /** 外から台帳に入れる入れ手（所属ごと・入れ手ごと）。staleSeconds を過ぎても呼ばれなければ、状態で stale にする */
+  sources?: Record<string, Record<string, { staleSeconds?: number }>>;
   headless?: boolean;
 };
 
