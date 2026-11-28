@@ -292,6 +292,12 @@ export async function startDaemon(opts: DaemonOptions) {
           aiUnread: a.ledger().countUnread(),
           gaps: a.ledger().gaps(),
           triggers: triggerConfigOf(a.name) ? a.triggers().stats() : '起こす条件が設定されていません',
+          // 外から入れる入れ手ごとの「最後に見に行った時刻・入れた数・最後の失敗」。staleSeconds を過ぎても呼ばれなければ stale
+          sources: a.ledger().sources().map((s) => {
+            const staleSeconds = readConfig(home).sources?.[a.name]?.[s.name]?.staleSeconds;
+            const stale = staleSeconds !== undefined ? !s.lastCallAt || Date.now() - Date.parse(s.lastCallAt) > staleSeconds * 1000 : undefined;
+            return { ...s, staleSeconds, stale };
+          }),
         } : undefined,
         windows: [...a.windows.values()].map((w) => ({
           session: w.session, label: w.label, url: w.url, touching: w.touching, lastEventAt: w.lastEventAt,
@@ -358,6 +364,25 @@ export async function startDaemon(opts: DaemonOptions) {
       const r = ledgerOf(name).read(p.stream, p.id, p.context ?? 5);
       if (!r) throw new Error(`台帳にその発言はありません: ${p.stream} / ${p.id}`);
       return r;
+    },
+    // 外から台帳に入れる（API で読めるものなど、窓を通さない入れ手のため）。拡張の w.ledger.put と同じ決まり・同じ返り値。
+    // 起こす条件・書き手の見分け・送った本文の突き合わせも同じに通すので、所属が動いているとき（Chrome が起きているとき）だけ受ける。
+    'ledger.put': async (p) => {
+      const name = affName(p.affiliation);
+      if (typeof p.source !== 'string' || !/^[\w.:-]{1,64}$/.test(p.source)) throw new Error('source（入れ手の名前・英数字と _ . : - だけ・64 字まで）が要ります');
+      if (!Array.isArray(p.items)) throw new Error('items（発言の配列。0 件でもよい）が要ります');
+      const a = affiliations.get(name);
+      if (!a?.running) throw new Error(`所属 ${name} は動いていません（外から入れる口は、所属が動いているときだけ受けます）`);
+      const by = `source:${p.source}`;
+      try {
+        const r = a.putItems(p.items, { initial: !!p.initial }, (rec) => a.log({ by, source: p.source, ...rec }));
+        a.ledger().recordSource(p.source, { added: r.added.length, updated: r.updated.length });
+        return r;
+      } catch (e: any) {
+        a.ledger().recordSource(p.source, { error: String(e?.message ?? e) });
+        a.log({ type: 'ledger-put-failed', by, source: p.source, error: String(e?.message ?? e) });
+        throw e;
+      }
     },
     'ledger.list': async (p) => {
       const name = affName(p.affiliation);

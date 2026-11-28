@@ -8,6 +8,19 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { startDaemon } from '../src/daemon.ts';
+import { spawn } from 'node:child_process';
+
+/** コマンドを非同期で動かす（常駐が同じプロセスにいるので、spawnSync だと常駐が返事できない） */
+function run(args: string[], input: string): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  return new Promise((res) => {
+    const c = spawn(process.execPath, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '';
+    c.stdout.on('data', (d) => (stdout += d));
+    c.stderr.on('data', (d) => (stderr += d));
+    c.on('close', (status) => res({ status, stdout, stderr }));
+    c.stdin.end(input);
+  });
+}
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '..');
@@ -296,6 +309,62 @@ test('台帳に入れるとき、設定の identity で書き手を見分ける�
   assert.deepEqual(by, { 'u-own': [true, 'human'], 'b-proxy': [false, 'human'], 'b-plain': [false, 'bot'] });
   writeFileSync(cfgPath, JSON.stringify(cfg));
   assert.ok(!(await call(mcp, 'remove_extension', { name: 'identity-ext' })).isError);
+});
+
+test('外から台帳に入れる口（put のコマンド）: 拡張と同じ決まりで入れて起こし、入れ手ごとに見に行った時刻・失敗・stale を出す', async () => {
+  // 外から入れる口は所属が動いているときだけ受ける。前の試験に頼らず、ここで窓を開いて所属を起こす
+  await call(mcp, 'open_window', { url: siteUrl });
+  const putTs = join(here, '..', 'src', 'put.ts');
+  const put = (items: unknown) => run([putTs, '--home', home, '--affiliation', 'test', '--source', 'mail-test'], JSON.stringify(items));
+  const src = async () => (await daemon.methods.status({})).affiliations.find((x: any) => x.name === 'test').ledger.sources.find((s: any) => s.name === 'mail-test');
+  let at = new Date().toISOString();
+  const itemOf = () => ({ stream: 'mail:inbox', id: 'm-1', at, text: '外から入れた秘密の本文', toMe: true, streamName: '外の受信箱' });
+  // 台帳がまだ空なら、最初に入る発言は「最初の取り込み」で起こさない（本体の決まり）。前の試験に頼らず、下地を 1 件 入れておく
+  assert.equal((await run([putTs, '--home', home, '--affiliation', 'test', '--source', 'seed'], JSON.stringify([{ stream: 'mail:seed', id: 's-1', at }]))).status, 0);
+  // 起こす条件を初めて使った時刻（有効にした時刻）より前の発言では起こさないので、発言の時刻は下地のあとに取る
+  at = new Date().toISOString();
+  const item = itemOf();
+  // 1. 入れる → 新しく入る・起こす条件を通る（本文は標準出力に出さない）
+  const before = notes.length;
+  let r = await put([item]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout).added, [{ stream: 'mail:inbox', id: 'm-1' }]);
+  assert.ok(!r.stdout.includes('秘密'), '標準出力に本文が出た');
+  await waitFor(() => notes.slice(before).some((n) => /^trigger id=\d+ rules=toMe .*stream=外の受信箱$/.test(n.text)), 10000, '外から入れた発言で起こす');
+  // 2. 同じものは 2 回 入れない
+  r = await put({ items: [item] });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).unchanged, 1);
+  // 3. 0 件でも「見に行った時刻」として数える
+  r = await put([]);
+  assert.equal(r.status, 0, r.stderr);
+  let s = await src();
+  assert.equal(s.calls, 3);
+  assert.equal(s.added, 1);
+  assert.ok(s.lastCallAt && s.lastAddedAt && s.lastCallAt >= s.lastAddedAt);
+  assert.equal(s.stale, undefined, 'staleSeconds を書いていないのに stale を決めた');
+  // 4. staleSeconds を過ぎたら stale、呼べば戻る
+  const cfgPath = join(home, 'config.json');
+  const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'));
+  writeFileSync(cfgPath, JSON.stringify({ ...cfg, sources: { test: { 'mail-test': { staleSeconds: 1 } } } }));
+  await new Promise((res) => setTimeout(res, 1300));
+  assert.equal((await src()).stale, true);
+  assert.equal((await put([])).status, 0);
+  assert.equal((await src()).stale, false);
+  writeFileSync(cfgPath, JSON.stringify(cfg));
+  // 5. 形の違う発言は 1 件も入れずに断り、失敗を数える
+  r = await put([{ stream: 'mail:inbox', at }]);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /渡（put）: /);
+  s = await src();
+  assert.equal(s.errors, 1);
+  assert.ok(s.lastError);
+  // 6. 動いていない所属・名前の無い入れ手・JSON でない入力は断る
+  assert.equal((await run([putTs, '--home', home, '--affiliation', 'nowhere', '--source', 'x'], '[]')).status, 1);
+  assert.equal((await run([putTs, '--home', home, '--affiliation', 'test'], '[]')).status, 1);
+  assert.match((await run([putTs, '--home', home, '--affiliation', 'test', '--source', 'x'], 'こわれた')).stderr, /JSON として読めません/);
+  // 7. 記録に入れ手が残る
+  assert.match(readFileSync(join(home, 'log', 'test.jsonl'), 'utf8'), /"by":"source:mail-test","source":"mail-test","type":"ledger-put"/);
 });
 
 test('台帳の無い所属を読んでも、台帳のファイルを作らない', async () => {
