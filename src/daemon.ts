@@ -292,6 +292,8 @@ export async function startDaemon(opts: DaemonOptions) {
           // 画面も通信も長く動いていない＝見えていないかもしれない（ログイン切れ・止まった画面）。「0 件」と区別するため
           stale: !w.lastEventAt || Date.now() - Date.parse(w.lastEventAt) > staleMs,
           gaps: w.gaps, lastReport: w.lastReport,
+          // ページが読み込めずエラーの画面のまま（読み直しを続けている）。「何も来ない」と区別するため
+          loadFailed: w.loadFailed,
           patrol: w.patrolStats(),
         })),
       })),

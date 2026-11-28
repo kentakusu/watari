@@ -17,6 +17,8 @@ const notes: Array<{ session: string; text: string }> = [];
 
 let site: Server;
 let siteUrl = '';
+let flakyArmed = false;
+let flakyUntil = 0;
 let daemon: Awaited<ReturnType<typeof startDaemon>>;
 let mcp: Client;
 
@@ -51,6 +53,12 @@ before(async () => {
   const html = readFileSync(join(here, 'fixtures', 'inbox.html'), 'utf8');
   site = createServer((req, res) => {
     const u = new URL(req.url ?? '/', 'http://x');
+    // 最初の 1 回だけ接続を切る（起動直後でネットワークが無いときのように、Chrome がエラーの画面になる）
+    if (u.pathname === '/flaky' && flakyArmed) {
+      // Chrome は切れた接続を自分で 1 回 打ち直すので、最初の要求から 2 秒の間は全部 切る
+      if (!flakyUntil) flakyUntil = Date.now() + 2000;
+      if (Date.now() < flakyUntil) { req.socket.destroy(); return; }
+    }
     if (u.pathname === '/compose') {
       res.setHeader('content-type', 'text/html; charset=utf-8');
       return res.end(readFileSync(join(here, 'fixtures', 'compose.html')));
@@ -422,6 +430,30 @@ test('書いて送る: 行ごとに入れて送り、空になるのを待つ。
   assert.equal(await readText('#sent'), '');
   assert.equal(await readText('#ed'), '');
   assert.ok(!(await call(mcp, 'remove_extension', { name: 'compose-ext' })).isError);
+});
+
+test('ページが読み込めずエラーの画面になったら、間を空けて元の URL を読み直す（エラーの画面の URL は覚えない）', async () => {
+  flakyArmed = true;
+  const url = `${siteUrl}flaky`;
+  await call(mcp, 'open_window', { url });
+  const tok = readFileSync(join(home, 'token'), 'utf8').trim();
+  const win = async () => {
+    const st = await (await fetch(`http://127.0.0.1:${port}/rpc`, { method: 'POST', headers: { authorization: `Bearer ${tok}`, 'content-type': 'application/json' }, body: JSON.stringify({ method: 'status' }) })).json() as any;
+    return st.result.affiliations.find((x: any) => x.name === 'test').windows.find((x: any) => x.session === 'test/mcp');
+  };
+  // 読み込めていない間: 状態に loadFailed が出て、窓の URL は元の URL のまま
+  await waitFor(async () => !!(await win()).loadFailed, 10000, '読み込めていないことが状態に出る');
+  const failing = await win();
+  assert.equal(failing.url, url, 'エラーの画面の URL を覚えた');
+  assert.equal(failing.loadFailed.url, url);
+  // 5 秒あとに読み直して、元のページに戻る
+  await waitFor(async () => { const w = await win(); return !w.loadFailed && JSON.parse(textOf(await call(mcp, 'window_info', { max_text: 0 }))).title === '試験用の受信箱'; }, 20000, '読み直して元のページに戻る');
+  const logText = readFileSync(join(home, 'log', 'test.jsonl'), 'utf8');
+  assert.match(logText, /"type":"page-load-failed"/);
+  assert.match(logText, /"type":"page-load-retry"/);
+  // 戻ったのが本体の読み直しによるものか（Chrome が自分で読み直すこともあるので、読み直した回数で見る）
+  const rec = logText.split('\n').filter((l) => l.includes('"type":"page-load-recovered"')).map((l) => JSON.parse(l)).at(-1);
+  assert.ok(rec && rec.retries >= 1, `本体の読み直しの前に戻った（Chrome が自分で読み直した）: ${JSON.stringify(rec)}`);
 });
 
 test('見えている分しか描かない一覧を、目当ての要素が出るまでたどる（末尾では続きの読み込みを待つ）', async () => {
