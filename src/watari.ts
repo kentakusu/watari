@@ -243,7 +243,7 @@ export class Affiliation {
       if (this.#stopping) return;
       for (const [s, w] of this.windows) if (w.targetId === p.targetId) {
         this.windows.delete(s);
-        w.stopPatrols();
+        w.stopBackground();
         this.log({ type: 'window-closed', session: s });
         this.onWindowsChanged?.();
         this.onWindowClosed?.({ session: s, url: w.url, label: w.label });
@@ -401,7 +401,7 @@ export class Affiliation {
 
   async stop(): Promise<void> {
     this.#stopping = true;
-    for (const w of this.windows.values()) w.stopPatrols();
+    for (const w of this.windows.values()) w.stopBackground();
     this.#triggers?.stop();
     this.#ledger?.close();
     this.#triggers = undefined;
@@ -462,7 +462,14 @@ export class SessionWindow {
       try { msg = JSON.parse(p.payload); } catch { return; }
       this.#onMessage(msg);
     });
-    cdp.on('Page.frameNavigated', (p, sid) => { if (sid === this.#sid && !p.frame.parentId) { this.url = p.frame.url; this.#armedThisLoad = false; } });
+    cdp.on('Page.frameNavigated', (p, sid) => {
+      if (sid !== this.#sid || p.frame.parentId) return;
+      this.#armedThisLoad = false;
+      const u = String(p.frame.url ?? '');
+      if (u.startsWith('chrome-error://')) { this.#onLoadFailed(); return; }
+      // 窓の URL（開き直すときの行き先）は、読み込めた http(s) のページだけで覚える（エラーの画面を覚えると、開き直してもエラーの画面になる）
+      if (/^https?:\/\//.test(u)) { this.url = u; this.#onLoadOk(); }
+    });
 
     await cdp.send('Page.enable', {}, sessionId);
     await cdp.send('Runtime.enable', {}, sessionId);
@@ -480,9 +487,55 @@ export class SessionWindow {
     this.#tap.onCapture = (rule, c) => this.#onCapture(rule, c);
     await this.#syncCaptures();
     if (this.#aff.closeToBackground(this.session)) await this.#armCloseGuard();
+    // 行き先を先に覚える（最初の読み込みが失敗しても、ここへ読み直しに行けるように）
+    if (/^https?:\/\//.test(url)) this.url = url;
     await cdp.send('Page.navigate', { url }, sessionId);
-    this.url ||= url;
     this.#aff.log({ type: 'window-opened', session: this.session, url, extensions: this.#aff.extensions.map((e) => e.name) });
+  }
+
+  // ---- 読み込めなかったページを読み直す ----
+  // 起動直後でネットワークがまだ無いときなど、ページが Chrome のエラーの画面になることがある。
+  // そのままにすると、拡張も見張りも何も受け取らないまま止まって見える。間を広げながら、覚えている URL を読み直す。
+  /** 読み込めていない（エラーの画面のまま）なら、その様子 */
+  loadFailed?: { since: string; url: string; retries: number };
+  #retryTimer?: ReturnType<typeof setTimeout>;
+  #stopped = false;
+
+  #onLoadFailed(): void {
+    if (!this.loadFailed) {
+      this.loadFailed = { since: now(), url: this.url, retries: 0 };
+      this.#aff.log({ type: 'page-load-failed', session: this.session, url: this.url });
+    }
+    this.#scheduleRetry();
+  }
+
+  #onLoadOk(): void {
+    if (this.#retryTimer) { clearTimeout(this.#retryTimer); this.#retryTimer = undefined; }
+    if (this.loadFailed) {
+      this.#aff.log({ type: 'page-load-recovered', session: this.session, url: this.url, retries: this.loadFailed.retries, since: this.loadFailed.since });
+      this.loadFailed = undefined;
+    }
+  }
+
+  #scheduleRetry(): void {
+    if (this.#retryTimer || this.#stopped || !this.loadFailed || !this.url) return;
+    const steps = [5, 15, 30, 60, 120, 300];
+    const sec = steps[Math.min(this.loadFailed.retries, steps.length - 1)];
+    this.#retryTimer = setTimeout(() => {
+      this.#retryTimer = undefined;
+      if (this.#stopped || !this.loadFailed) return;
+      this.loadFailed.retries++;
+      this.#aff.log({ type: 'page-load-retry', session: this.session, url: this.url, retry: this.loadFailed.retries });
+      void this.#serial(() => this.cdp.send('Page.navigate', { url: this.url }, this.#sid)).catch(() => this.#scheduleRetry());
+    }, sec * 1000);
+    this.#retryTimer.unref?.();
+  }
+
+  /** 窓を閉じた・所属を止めたときに、背景で動くもの（巡回・読み直し）を止める */
+  stopBackground(): void {
+    this.#stopped = true;
+    if (this.#retryTimer) { clearTimeout(this.#retryTimer); this.#retryTimer = undefined; }
+    this.stopPatrols();
   }
 
   async #syncCaptures(): Promise<void> {
@@ -542,6 +595,8 @@ export class SessionWindow {
   }
 
   async navigate(url: string): Promise<void> {
+    // 行き先を先に覚える（読み込みに失敗しても、前のページではなくここへ読み直しに行けるように）
+    if (/^https?:\/\//.test(url)) this.url = url;
     await this.#serial(() => this.cdp.send('Page.navigate', { url }, this.#sid));
     this.#aff.log({ type: 'navigate', session: this.session, url });
   }
