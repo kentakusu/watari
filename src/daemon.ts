@@ -158,7 +158,11 @@ export async function startDaemon(opts: DaemonOptions) {
         if (why === 'window') await tell(a, `【渡】窓 ${w.session} が閉じられました。この窓では拡張（${exts}）は何も見ていません。開き直すには open_window を、閉じられても開き直すなら config.json の keepOpen に ${w.session} を入れてください。`);
         continue;
       }
-      if (reopening.has(w.session)) continue; // 窓が閉じた → Chrome が終わった、と続けて来たときに二重に開かない
+      if (reopening.has(w.session)) {
+        // 窓が閉じた → Chrome が終わった、と続けて来たときに二重に開かない。黙って見送らず、記録に残す
+        a.log({ type: 'window-reopen-skipped', session: w.session, why, reason: '開き直している最中' });
+        continue;
+      }
       const now = Date.now();
       const times = (reopenTimes.get(w.session) ?? []).filter((t) => now - t < 10 * 60000);
       if (times.length >= 3) {
@@ -176,6 +180,8 @@ export async function startDaemon(opts: DaemonOptions) {
         const minimized = readConfig(home).keepOpenMinimized === false ? false : await reopened.minimize();
         saveWindows();
         target.log({ type: 'window-reopened', session: w.session, why, minimized });
+        // 開き直し終えたら、知らせを待たずに印を外す（知らせが遅い間にまた閉じられても、見送らずに開き直すため）
+        reopening.delete(w.session);
         await tell(target, `【渡】窓 ${w.session} が${why === 'chrome' ? '（Chrome ごと）' : ''}閉じられたので、${minimized ? '最小化で' : ''}開き直しました（keepOpen）。閉じていた間のものを拡張が読み直すかは、拡張の作り次第です。`);
       } catch (e: any) {
         a.log({ type: 'window-reopen-failed', session: w.session, error: String(e?.message ?? e) });
