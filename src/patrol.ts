@@ -54,6 +54,8 @@ export type PatrolStats = {
   runs: number; opened: number; caughtUp: number; failed: number; notRendered: number; ignoredOwnerReads: number;
   lastRunAt?: string; lastError?: string;
   waiting: Array<{ stream: string; failures: number; retryAt: string }>;
+  /** 続けて一覧に見つからない部屋（一覧に無いのかもしれない。拡張か人が確かめる宿題） */
+  missingFromList: Array<{ stream: string; times: number }>;
 };
 
 export class Patrol {
@@ -71,7 +73,9 @@ export class Patrol {
   #skipUntil = new Map<string, number>();
   #openedAt = new Map<string, number>();
   #lastNudge = new Map<string, number>();
-  #stats: PatrolStats = { runs: 0, opened: 0, caughtUp: 0, failed: 0, notRendered: 0, ignoredOwnerReads: 0, waiting: [] };
+  /** 続けて一覧に見つからなかった回数（見つかれば消す） */
+  #missing = new Map<string, number>();
+  #stats: PatrolStats = { runs: 0, opened: 0, caughtUp: 0, failed: 0, notRendered: 0, ignoredOwnerReads: 0, waiting: [], missingFromList: [] };
 
   constructor(spec: PatrolSpec, deps: PatrolDeps) {
     this.spec = spec;
@@ -136,11 +140,18 @@ export class Patrol {
       if (!row.present) {
         // 一覧に見つからない（描かれていない・一覧から外れた）。黙らずに数え、間を空ける
         this.#stats.notRendered++;
-        this.#d.log({ type: 'patrol-not-rendered', stream: c.stream });
+        const times = (this.#missing.get(c.stream) ?? 0) + 1;
+        this.#missing.set(c.stream, times);
         this.#fail(c.stream, c.important);
+        // 続けて見つからない部屋は、一覧に無いのかもしれない。毎回たどらないよう、間を倍々に広げる（6 時間まで）
+        const r = this.spec.retry ?? {};
+        const k = c.important ? times - (r.importantTimes ?? 3) : times;
+        if (k >= 2) this.#fails.get(c.stream)!.until = this.#now() + Math.min((r.otherMs ?? 600_000) * 2 ** (k - 1), 6 * 3600_000);
+        this.#d.log({ type: 'patrol-not-rendered', stream: c.stream, times, retryAt: new Date(this.#fails.get(c.stream)!.until).toISOString() });
         this.#forced.delete(c.stream);
         continue;
       }
+      this.#missing.delete(c.stream);
       if (!c.forced && !c.important && !row.unread) {
         // 未読の印が無い（持ち主がよそで読んだなど）。開かずに、しばらく見送る
         this.#skipUntil.set(c.stream, this.#now() + 30_000);
@@ -207,6 +218,7 @@ export class Patrol {
     const t = this.#now();
     this.#stats.waiting = [...this.#fails.entries()].filter(([, f]) => f.until > t)
       .map(([stream, f]) => ({ stream, failures: f.count, retryAt: new Date(f.until).toISOString() }));
+    this.#stats.missingFromList = [...this.#missing.entries()].filter(([, n]) => n >= 2).map(([stream, times]) => ({ stream, times }));
   }
 
   /** 巡回で開いた直後か（そのあいだの「持ち主の既読」は、サイトが勝手に付けたものとみなす） */

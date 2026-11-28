@@ -961,7 +961,7 @@ export class SessionWindow {
       p = new Patrol(spec, {
         behind: () => aff.ledger().behind(),
         important: (s) => { const c = aff.triggerConfigNow(); return !!(c?.selfStreams?.includes(s) || c?.namedStreams?.includes(s)); },
-        rowState: (s) => this.#serial(() => this.#findRow(spec, s)),
+        rowState: (s) => this.#findRow(spec, s),
         open: (s, o) => this.#serial(async () => {
           await this.#waitUntilFree();
           if (o.reselect) {
@@ -989,18 +989,23 @@ export class SessionWindow {
       return r ? { present: true, selected: has(r, ${JSON.stringify(spec.selected ?? '')}), unread: has(r, ${JSON.stringify(spec.unread ?? '')}) } : { present: false }; })()`);
   }
 
-  /** 行を探す。描かれていなければ一覧をたどる（見つからなければ先頭に戻す） */
+  /**
+   * 行を探す。描かれていなければ一覧をたどる（見つからなければ先頭に戻す）。
+   * 1 段ずつ窓の列に並べ、待つ間は列を空ける（探している間も、拡張が通信を受け取れるように）
+   */
   async #findRow(spec: PatrolSpec, stream: string): Promise<RowState> {
-    let r = await this.#rowState(spec, stream);
+    let r = await this.#serial(() => this.#rowState(spec, stream));
     if (r.present) return r;
     for (let step = 0; step < 30 && !r.present; step++) {
-      await this.#waitUntilFree();
-      const moved = await this.#eval(`(() => { const s = ${this.#scrollerExpr(spec.rows)}; const b = s.scrollTop; s.scrollTop = b + s.clientHeight * 0.8; return s.scrollTop !== b; })()`);
+      const moved = await this.#serial(async () => {
+        await this.#waitUntilFree();
+        return this.#eval(`(() => { const s = ${this.#scrollerExpr(spec.rows)}; const b = s.scrollTop; s.scrollTop = b + s.clientHeight * 0.8; return s.scrollTop !== b; })()`);
+      });
       await new Promise((res) => setTimeout(res, 300));
-      r = await this.#rowState(spec, stream);
+      r = await this.#serial(() => this.#rowState(spec, stream));
       if (!moved) break;
     }
-    if (!r.present) await this.#scrollToTop(spec.rows).catch(() => {});
+    if (!r.present) await this.#serial(() => this.#scrollToTop(spec.rows)).catch(() => {});
     return r;
   }
 

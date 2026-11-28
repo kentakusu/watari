@@ -85,6 +85,26 @@ test('一覧に描かれていない部屋は黙らずに数え、間を空け�
   assert.ok(w.logs.some((l) => l.type === 'patrol-not-rendered' && l.stream === 'a'));
 });
 
+test('続けて一覧に見つからない部屋は、間を倍々に広げ（6 時間まで）、状態に出す。見つかれば戻す', async () => {
+  const room: Room = { latest: 5, have: 3, unread: true, rendered: false };
+  const w = world({ a: room }, { retry: { otherMs: 600_000 } });
+  const looks = async () => { await w.p.run(); return w.p.stats(); };
+  await looks(); // 1 回目: 10 分
+  w.advance(600_000); await looks(); // 2 回目: 20 分あと
+  assert.deepEqual(w.p.stats().missingFromList, [{ stream: 'a', times: 2 }]);
+  w.advance(600_000); await looks();
+  assert.equal(w.p.stats().notRendered, 2, '20 分たつ前に、また探しに行った');
+  w.advance(600_000); await looks(); // 3 回目: 40 分あと
+  assert.equal(w.p.stats().notRendered, 3);
+  const retryAt = Date.parse(w.p.stats().waiting[0].retryAt);
+  assert.ok(retryAt - (1_000_000 + 1_800_000) >= 2_400_000 - 1, '3 回目のあとが 40 分になっていない');
+  // 一覧に出てきたら、開いて、見つからない部屋の一覧から外れる
+  room.rendered = true;
+  w.advance(6 * 3600_000); await looks();
+  assert.deepEqual(w.opened, ['a']);
+  assert.deepEqual(w.p.stats().missingFromList, []);
+});
+
 test('巡回で開いた直後の持ち主の既読は無視する（間を過ぎれば受け取る）', async () => {
   const w = world({ a: { latest: 5, have: 3, unread: true } }, { ignoreOwnerReadMs: 90_000 });
   assert.equal(w.p.ignoreOwnerRead('a'), false, '開く前から無視している');
